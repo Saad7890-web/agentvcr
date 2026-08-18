@@ -99,6 +99,8 @@ class Step:
     model: str | None = None
     usage: dict[str, Any] | None = None
     latency_ms: int | None = None
+    #: Upstream HTTP status. Errors are recorded as steps so a retry sequence replays.
+    status_code: int | None = None
     diverged: bool = False
     started_at: str | None = None
     id: int | None = None
@@ -116,6 +118,7 @@ class Step:
             model=row["model"],
             usage=_loads(row["usage_json"]),
             latency_ms=row["latency_ms"],
+            status_code=row["status_code"],
             diverged=bool(row["diverged"]),
             started_at=row["started_at"],
         )
@@ -131,9 +134,15 @@ class Step:
             "model": self.model,
             "usage_json": _dumps(self.usage),
             "latency_ms": self.latency_ms,
+            "status_code": self.status_code,
             "diverged": int(self.diverged),
             "started_at": self.started_at,
         }
+
+    @property
+    def ok(self) -> bool:
+        """Whether the upstream answered successfully (unknown status counts as ok)."""
+        return self.status_code is None or self.status_code < 400
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)

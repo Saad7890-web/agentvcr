@@ -6,9 +6,11 @@ with a ``user_version``-based migration runner — no ORM (standing decision, PL
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -95,9 +97,22 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_edits_run ON edits(run_id, step_idx);
     """,
+    # v2 — upstream status per step. Failed calls are recorded like any other step so
+    # that an SDK's retry sequence replays exactly as it was recorded (see recorder.py).
+    """
+    ALTER TABLE steps ADD COLUMN status_code INTEGER;
+    """,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
+
+
+class SchemaTooNewError(RuntimeError):
+    """The database was written by a newer agentvcr than the one opening it."""
+
+
+def _dumps_meta(value: Any) -> str | None:
+    return None if value is None else json.dumps(value, ensure_ascii=False)
 
 
 class Store:
@@ -106,6 +121,10 @@ class Store:
     def __init__(self, connection: sqlite3.Connection, *, path: Path | None = None) -> None:
         self.conn = connection
         self.path = path
+        # One connection serves the whole process (the proxy handles calls concurrently),
+        # so writes and explicit transactions are serialized here. WAL only isolates
+        # separate connections; two BEGINs on one connection are an error.
+        self._lock = threading.RLock()
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -131,6 +150,11 @@ class Store:
     def migrate(self) -> int:
         """Apply pending migrations; returns the resulting schema version."""
         version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            raise SchemaTooNewError(
+                f"tape was written by a newer agentvcr (schema v{version}, "
+                f"this build understands v{SCHEMA_VERSION}); upgrade agentvcr to read it"
+            )
         for i, script in enumerate(MIGRATIONS[version:], start=version + 1):
             # executescript() commits any open transaction, so the BEGIN/COMMIT that
             # makes each migration atomic has to live inside the script itself.
@@ -143,14 +167,15 @@ class Store:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        self.conn.execute("BEGIN")
-        try:
-            yield self.conn
-        except BaseException:
-            self.conn.execute("ROLLBACK")
-            raise
-        else:
-            self.conn.execute("COMMIT")
+        with self._lock:
+            self.conn.execute("BEGIN")
+            try:
+                yield self.conn
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+            else:
+                self.conn.execute("COMMIT")
 
     def close(self) -> None:
         self.conn.close()
@@ -205,7 +230,8 @@ class Store:
             ).fetchall()
         else:
             rows = self.conn.execute(
-                "SELECT * FROM runs WHERE parent_run_id = ? ORDER BY created_at DESC LIMIT ?",
+                "SELECT * FROM runs WHERE parent_run_id = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
                 (parent_run_id, limit),
             ).fetchall()
         return [Run.from_row(r) for r in rows]
@@ -213,6 +239,8 @@ class Store:
     def update_run(self, run_id: str, **fields: Any) -> None:
         if not fields:
             return
+        if "meta" in fields:
+            fields["meta_json"] = _dumps_meta(fields.pop("meta"))
         allowed = {
             "name",
             "mode",
@@ -228,7 +256,10 @@ class Store:
         if unknown:
             raise ValueError(f"cannot update run field(s): {sorted(unknown)}")
         assignments = ", ".join(f"{k} = ?" for k in fields)
-        self.conn.execute(f"UPDATE runs SET {assignments} WHERE id = ?", (*fields.values(), run_id))
+        with self._lock:
+            self.conn.execute(
+                f"UPDATE runs SET {assignments} WHERE id = ?", (*fields.values(), run_id)
+            )
 
     # ---------------------------------------------------------------------- steps
 
@@ -238,8 +269,13 @@ class Store:
         ).fetchone()
         return int(row[0])
 
-    def add_step(self, step: Step) -> Step:
-        step.id = self._insert("steps", step.to_row())
+    def add_step(self, step: Step, *, at_next_idx: bool = False) -> Step:
+        """Persist a step. ``at_next_idx`` allocates ``idx`` under the write lock, so
+        concurrent recordings on one run cannot collide on ``UNIQUE (run_id, idx)``."""
+        with self._lock:
+            if at_next_idx:
+                step.idx = self.next_step_idx(step.run_id)
+            step.id = self._insert("steps", step.to_row())
         return step
 
     def get_step(self, run_id: str, idx: int) -> Step | None:
@@ -259,9 +295,10 @@ class Store:
         return int(row[0])
 
     def mark_diverged(self, run_id: str, idx: int) -> None:
-        self.conn.execute(
-            "UPDATE steps SET diverged = 1 WHERE run_id = ? AND idx = ?", (run_id, idx)
-        )
+        with self._lock:
+            self.conn.execute(
+                "UPDATE steps SET diverged = 1 WHERE run_id = ? AND idx = ?", (run_id, idx)
+            )
 
     # ----------------------------------------------------------------- tool calls
 
@@ -292,7 +329,8 @@ class Store:
     def _insert(self, table: str, row: dict[str, Any]) -> int:
         columns = ", ".join(row)
         placeholders = ", ".join("?" for _ in row)
-        cursor = self.conn.execute(
-            f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", tuple(row.values())
-        )
-        return int(cursor.lastrowid or 0)
+        with self._lock:
+            cursor = self.conn.execute(
+                f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", tuple(row.values())
+            )
+            return int(cursor.lastrowid or 0)

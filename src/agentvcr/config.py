@@ -136,6 +136,8 @@ def _from_env(environ: dict[str, str]) -> dict[str, Any]:
         values["mismatch_policy"] = environ["AGENTVCR_MISMATCH_POLICY"]
     if "AGENTVCR_IDLE_TIMEOUT" in environ:
         values["idle_timeout_s"] = _float(environ["AGENTVCR_IDLE_TIMEOUT"], "AGENTVCR_IDLE_TIMEOUT")
+    if "AGENTVCR_RECORD_CHUNKS" in environ:
+        values["record_chunks"] = _bool(environ["AGENTVCR_RECORD_CHUNKS"], "AGENTVCR_RECORD_CHUNKS")
     if "AGENTVCR_PRESET" in environ:
         values["upstreams"] = _preset_upstreams(environ["AGENTVCR_PRESET"])
     for provider in PROVIDERS:
@@ -158,6 +160,15 @@ def _int(value: str, label: str) -> int:
         return int(value)
     except ValueError:
         raise ConfigError(f"{label} must be an integer, got {value!r}") from None
+
+
+def _bool(value: str, label: str) -> bool:
+    lowered = value.strip().lower()
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    if lowered in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigError(f"{label} must be a boolean, got {value!r}")
 
 
 def _float(value: str, label: str) -> float:

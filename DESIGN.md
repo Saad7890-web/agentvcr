@@ -67,19 +67,28 @@ add-on for users who want it.
 | `fork` | after fork point | Replays the tape up to the fork/edit point, then goes live against the real API (recording the new branch as a child run). |
 | `passthrough` | yes | Pure proxy, no recording (escape hatch). |
 
-Mode is selected per-run via the `X-AgentVCR-Mode` header, the `AGENTVCR_MODE` env var
-(read by the CLI wrapper), or the proxy's default setting.
+Mode is resolved per request: the `X-AgentVCR-Mode` header wins, then the mode stored on
+the resolved run (which is how `agentvcr run --mode replay` takes effect without the agent
+sending anything), then the proxy's default setting.
+
+**Mount convention.** A provider's path prefix mirrors its upstream base URL, so swapping
+`base_url` is the whole change and no path rewriting is needed: `/openai/v1` stands in for
+`https://api.openai.com/v1`, `/anthropic` for `https://api.anthropic.com`. Everything after
+the prefix is forwarded verbatim.
 
 ## 4. Runs, steps, and how requests join a run
 
 A **run** is one agent execution; a **step** is one LLM call within it (tool steps are
 derived, see §2). Two ways a request is assigned to a run:
 
-1. **Explicit (reliable):** client sends `X-AgentVCR-Run: <id>` (both OpenAI and
-   Anthropic SDKs support `default_headers`), or the user launches via the CLI wrapper —
-   `agentvcr run -- python agent.py` — which creates the run, exports
-   `AGENTVCR_RUN`/`AGENTVCR_MODE`, and **stores the command line** (this powers one-click
-   re-run from the UI later).
+1. **Explicit (reliable):** two forms, because most agents cannot set headers.
+   - **In the base URL:** the proxy also mounts every provider under `/r/<run-id>/…`, so
+     `http://localhost:8484/r/01H…/openai/v1` pins the run without the client knowing.
+     This is what `agentvcr run -- python agent.py` uses: it creates the run, exports
+     `OPENAI_BASE_URL`/`ANTHROPIC_BASE_URL` pointing at that prefix (plus
+     `AGENTVCR_RUN`/`AGENTVCR_MODE`), and **stores the command line** (this powers
+     one-click re-run from the UI later). The agent needs no change at all.
+   - **In a header:** `X-AgentVCR-Run: <id>`, for clients that support `default_headers`.
 2. **Heuristic (zero-config):** an incoming request whose message list extends the
    message prefix of an active run's last step is chained onto that run; otherwise a new
    run starts. An idle timeout closes runs. Good enough for the drop-in demo; the
@@ -100,6 +109,13 @@ derived, see §2). Two ways a request is assigned to a run:
   response as SSE chunks (synthesized from the stored final message; optionally the raw
   recorded chunk sequence). Recorded streams are always accumulated into a final
   message at record time so both stream and non-stream replay work from one tape.
+- **Errors and retries.** A non-2xx upstream response is recorded as a step like any
+  other, with its status code. Both SDKs retry 429/500 by default, so one logical call
+  can produce two steps — and because the failure is on the tape, positional replay
+  reproduces the same 429-then-success sequence the client already knows how to handle.
+  Recording only successes would desynchronize every later step. A request that never
+  reaches the provider (connection refused, DNS failure) is *not* recorded: there is no
+  response to serve back, and the proxy answers 502.
 - **Concurrency note (post-MVP):** parallel LLM calls (multi-agent fan-out) break pure
   positional order → matching falls back to fingerprint-first with position as
   tiebreak. Flagged for milestone 7, not the MVP.

@@ -16,20 +16,54 @@ Anthropic wire format works — including Groq, Gemini, OpenRouter, Ollama and v
 
 ## Status
 
-Early development. Phase 0 (scaffold) is in place: config, SQLite store, CLI and a
-health endpoint. Record, replay, fork, diff and the web UI land in phases 1–5 — see
-[`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
+Early development. **Record mode works** (phase 1): the proxy forwards OpenAI-format
+calls to any compatible upstream, streaming included, and writes every step to a local
+SQLite tape you can list and inspect. Replay, fork, diff and the web UI land in phases
+2–5 — see [`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
 
-## Quickstart (development)
+`/anthropic/*` is mounted but forwards unrecorded until phase 3.
+
+## Quickstart
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev]'        # from a checkout; the PyPI release lands at v0.1.0
 
-agentvcr serve --preset groq      # proxy on http://127.0.0.1:8484
-curl -s localhost:8484/healthz
+agentvcr serve --preset groq                        # terminal 1
+agentvcr run --name flights -- python agent.py      # terminal 2
 
-pytest && ruff check .
+agentvcr runs
+agentvcr show <run-id>
+```
+
+```
+STEP  MODEL                   HTTP  LATENCY   TOKENS  RESPONSE
+0     llama-3.1-8b-instant    200   641ms     412     → search_flights({"origin": "SFO", ...})
+1     llama-3.1-8b-instant    200   388ms     503     The cheapest SFO→JFK flight is B6918 at $289.
+```
+
+`agentvcr run` needs no change to your agent at all: it creates the run and exports
+`OPENAI_BASE_URL=http://127.0.0.1:8484/r/<run-id>/openai/v1`, so the run id rides along
+in the base URL. Without the wrapper, change one line instead:
+
+```python
+client = OpenAI(base_url="http://localhost:8484/openai/v1")
+```
+
+A complete example lives in [`examples/plain-loop/`](examples/plain-loop/).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `agentvcr serve` | Start the proxy (`--preset groq\|gemini\|openai\|anthropic`, `--port`, `--db`) |
+| `agentvcr run -- <cmd>` | Create a run, point the child at the proxy, record it, store its argv |
+| `agentvcr runs` | List recorded runs, newest first |
+| `agentvcr show <run>` | Step table for one run (`--json` for the machine-readable form) |
+
+## Development
+
+```bash
+pytest && ruff check . && ruff format --check .
 ```
 
 ## Configuration
@@ -51,13 +85,15 @@ openai = "http://localhost:11434/v1"
 
 Environment equivalents: `AGENTVCR_PORT`, `AGENTVCR_DB`, `AGENTVCR_MODE`,
 `AGENTVCR_PRESET`, `AGENTVCR_UPSTREAM_OPENAI`, `AGENTVCR_UPSTREAM_ANTHROPIC`,
-`AGENTVCR_MISMATCH_POLICY`, `AGENTVCR_HOST`, `AGENTVCR_IDLE_TIMEOUT`.
+`AGENTVCR_MISMATCH_POLICY`, `AGENTVCR_HOST`, `AGENTVCR_IDLE_TIMEOUT`,
+`AGENTVCR_RECORD_CHUNKS`.
 
 ## Privacy
 
 The proxy binds to `127.0.0.1` by default. `Authorization`, `x-api-key` and cookie
-headers are forwarded upstream but **never written to disk**. Recordings do contain your
-prompts, so add `.agentvcr/` to your `.gitignore`.
+headers are forwarded upstream but **never written to disk** — a test asserts the key
+appears nowhere in the database file. Recordings do contain your prompts, so add
+`.agentvcr/` to your `.gitignore`.
 
 ## License
 

@@ -12,40 +12,51 @@ See `DESIGN.md` for the architecture these phases implement.
 
 Repo skeleton and plumbing so every later phase is just filling in modules.
 
-- [ ] `pyproject.toml` (hatchling, `requires-python >= 3.10`), deps: `fastapi`,
+- [x] `pyproject.toml` (hatchling, `requires-python >= 3.10`), deps: `fastapi`,
       `uvicorn`, `httpx`, `typer`; dev deps: `pytest`, `pytest-asyncio`, `respx`, `ruff`
-- [ ] `src/agentvcr/` package layout from DESIGN.md §9, with empty modules + docstrings
-- [ ] `config.py`: settings from flags/env/`agentvcr.toml` (port, db path, upstream map,
+- [x] `src/agentvcr/` package layout from DESIGN.md §9, with empty modules + docstrings
+- [x] `config.py`: settings from flags/env/`agentvcr.toml` (port, db path, upstream map,
       mode default, mismatch policy); presets for `openai`, `anthropic`, `groq`, `gemini`
-- [ ] `core/store.py`: SQLite open/migrate (schema from DESIGN.md §8), `core/models.py`
+- [x] `core/store.py`: SQLite open/migrate (schema from DESIGN.md §8), `core/models.py`
       dataclasses
-- [ ] `cli.py`: `agentvcr serve` boots FastAPI app with a `/healthz` route
-- [ ] CI: ruff + pytest on push; Apache-2.0 LICENSE; README stub with the one-liner
+- [x] `cli.py`: `agentvcr serve` boots FastAPI app with a `/healthz` route
+- [x] CI: ruff + pytest on push; Apache-2.0 LICENSE; README stub with the one-liner
 
 **Done when:** `uvx --from . agentvcr serve` starts and `/healthz` answers; CI is green.
+**Done.**
 
 ## Phase 1 — Record mode, OpenAI format (week 1)
 
 The proxy earns its keep: transparent passthrough that records.
 
-- [ ] `server/proxy.py`: `POST /openai/v1/chat/completions` → forward to configured
+- [x] `server/proxy.py`: `POST /openai/v1/chat/completions` → forward to configured
       upstream with client's auth headers; stream SSE through to the client while
       accumulating the final message (`providers/openai_chat.py` does the accumulation)
-- [ ] Generic passthrough for other `/openai/v1/*` paths (e.g. `/models`) — proxied,
+- [x] Generic passthrough for other `/openai/v1/*` paths (e.g. `/models`) — proxied,
       not recorded
-- [ ] `core/recorder.py`: persist step (redacted request, final response, optional raw
+- [x] `core/recorder.py`: persist step (redacted request, final response, optional raw
       chunks, fingerprint, model, usage, latency); header redaction list
-- [ ] Run assignment: `X-AgentVCR-Run` header → run; else grouping heuristic
+- [x] Run assignment: `X-AgentVCR-Run` header → run; else grouping heuristic
       (message-prefix chaining + idle timeout) per DESIGN.md §4
-- [ ] `agentvcr run [--name X] -- <cmd>`: creates run, exports `AGENTVCR_RUN` /
+- [x] `agentvcr run [--name X] -- <cmd>`: creates run, exports `AGENTVCR_RUN` /
       `AGENTVCR_MODE` / `OPENAI_BASE_URL`, stores argv on the run
-- [ ] `agentvcr runs` (list) and `agentvcr show <run>` (step table) — plain text is fine
-- [ ] Tests with `respx`-mocked upstream: non-stream and stream recording, redaction,
+- [x] `agentvcr runs` (list) and `agentvcr show <run>` (step table) — plain text is fine
+- [x] Tests with `respx`-mocked upstream: non-stream and stream recording, redaction,
       run grouping
+
+Folded in while building (decisions from the Phase 0 design review):
+
+- [x] `passthrough` mode — it was in DESIGN.md §3 and `config.MODES` but no phase owned it
+- [x] Errors recorded as steps, so an SDK retry sequence stays on the tape (DESIGN.md §5)
+- [x] Run id carried in the base URL (`/r/<id>/…`), the only explicit mechanism that works
+      for agents that cannot set headers — this is what makes `agentvcr run` zero-change
+- [x] Store: serialize writes behind a lock (one connection, concurrent proxy calls) and
+      refuse a tape written by a newer schema
 
 **Done when:** a scripted tool-loop agent (`examples/plain-loop/`, OpenAI SDK pointed
 at the proxy, Groq free tier as upstream) runs unmodified except `base_url`, and
 `agentvcr show` displays its calls. **No API key ever appears in the DB** (test asserts).
+**Done** — `tests/test_record_roundtrip.py` is the automated form of this check.
 
 ## Phase 2 — Replay mode (week 1–2)
 

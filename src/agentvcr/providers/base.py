@@ -15,9 +15,14 @@ from typing import Any, Protocol
 class Provider(Protocol):
     """What ``core`` needs to know about a wire format."""
 
-    #: Path prefix the proxy mounts this provider under, e.g. ``"openai"``.
+    #: Registry key and path segment, e.g. ``"openai"``.
     name: str
-    #: Paths (relative to the prefix) whose calls are recorded as steps.
+    #: Prefix the proxy mounts this provider under. It mirrors the upstream base URL,
+    #: so a client's ``base_url`` swap is the only change: ``/openai/v1`` stands in for
+    #: ``https://api.openai.com/v1``, ``/anthropic`` for ``https://api.anthropic.com``.
+    mount_path: str
+    #: Paths (relative to ``mount_path``) whose calls are recorded as steps. Everything
+    #: else under the mount is proxied verbatim.
     recorded_paths: tuple[str, ...]
 
     def normalize(self, body: dict[str, Any]) -> dict[str, Any]:
@@ -43,6 +48,12 @@ class Provider(Protocol):
 
     def model_of(self, body: dict[str, Any]) -> str | None:
         """Model name for display and step metadata."""
+
+    def messages_of(self, body: dict[str, Any]) -> list[Any]:
+        """The request's message list — what run grouping chains on (DESIGN.md §4)."""
+
+    def assistant_text(self, response: dict[str, Any]) -> str | None:
+        """Assistant text of a final response, for terminal and UI previews."""
 
     def usage_of(self, response: dict[str, Any]) -> dict[str, Any] | None:
         """Token usage from a final response, if the format reports one."""

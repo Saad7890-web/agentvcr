@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from agentvcr.core.models import STATUS_COMPLETED
+from agentvcr.core.models import STATUS_COMPLETED, Step
 from agentvcr.core.recorder import REDACTION_PLACEHOLDER, RunRouter, redact_headers
 from agentvcr.core.store import Store
 from agentvcr.providers import OPENAI
@@ -57,10 +57,27 @@ def test_an_unrelated_conversation_starts_a_new_run(store: Store) -> None:
 
 
 def test_a_retry_of_the_same_request_stays_on_its_run(store: Store) -> None:
+    """An SDK retrying a 429 repeats the request verbatim; that stays one run."""
     router = RunRouter(store)
     first = router.resolve(provider=OPENAI, body=body("a"), mode="record")
+    store.add_step(Step(run_id=first.id, idx=0, request={}, status_code=429), at_next_idx=True)
+
     retry = router.resolve(provider=OPENAI, body=body("a"), mode="record")
     assert retry.id == first.id
+
+
+def test_a_second_agent_with_the_same_prompt_gets_its_own_run(store: Store) -> None:
+    """The same request repeated after a *successful* one is a new run, not a retry.
+
+    Two copies of one agent started concurrently open with identical messages; without
+    this they would record onto a single tape.
+    """
+    router = RunRouter(store)
+    first = router.resolve(provider=OPENAI, body=body("a"), mode="record")
+    store.add_step(Step(run_id=first.id, idx=0, request={}, status_code=200), at_next_idx=True)
+
+    second = router.resolve(provider=OPENAI, body=body("a"), mode="record")
+    assert second.id != first.id
 
 
 def test_the_longest_matching_prefix_wins(store: Store) -> None:

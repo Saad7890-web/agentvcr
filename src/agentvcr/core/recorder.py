@@ -144,12 +144,27 @@ class RunRouter:
         for active in self._active.values():
             if len(active.keys) > len(keys) or keys[: len(active.keys)] != active.keys:
                 continue
+            if len(active.keys) == len(keys) and not self._is_retry(active.run_id):
+                continue
             if best is None or (len(active.keys), active.last_seen) > (
                 len(best.keys),
                 best.last_seen,
             ):
                 best = active
         return best.run_id if best else None
+
+    def _is_retry(self, run_id: str) -> bool:
+        """Whether an identical repeat of a run's last request is a retry of it.
+
+        An agent that continues a conversation always *extends* the message list, so an
+        exactly-equal one is either an SDK retry or a second agent starting from the
+        same prompt — indistinguishable by content. The last step tells them apart: a
+        retry follows a failed call, whereas a repeat of a request the run already
+        answered successfully is a different run beginning the same way. Without this,
+        two concurrent runs of one agent would record onto a single tape.
+        """
+        last = self.store.last_step(run_id)
+        return last is not None and not last.ok
 
     def _track(self, run_id: str, keys: list[str]) -> None:
         self._active[run_id] = _ActiveRun(run_id=run_id, keys=keys, last_seen=self.clock())

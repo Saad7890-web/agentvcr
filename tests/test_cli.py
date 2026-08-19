@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -13,6 +14,21 @@ from agentvcr.core.store import Store
 
 runner = CliRunner()
 
+#: Rich's box drawing, and the colour codes around it.
+_DECORATION = re.compile(r"\x1b\[[0-9;]*m|[\s\u2500-\u257f]+")
+
+
+def rendered(result) -> str:
+    """CLI output with Rich's panel formatting taken back out.
+
+    Typer renders usage errors and help inside a bordered panel, wrapping the text to
+    the terminal width — and *folding* a token that lands on the border itself. Where
+    the break falls depends on the width and on the Rich version, so matching the raw
+    output is a coin toss that passes locally and fails in CI. Stripping the decoration
+    and the whitespace makes the assertion about the message rather than its layout.
+    """
+    return _DECORATION.sub("", result.output)
+
 
 def test_version() -> None:
     result = runner.invoke(app, ["version"])
@@ -23,7 +39,7 @@ def test_version() -> None:
 def test_help_lists_serve() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    assert "serve" in result.stdout
+    assert "serve" in rendered(result)
 
 
 def test_serve_rejects_unknown_preset() -> None:
@@ -35,7 +51,7 @@ def test_help_lists_the_phase_1_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
     for command in ("serve", "run", "runs", "show"):
-        assert command in result.stdout
+        assert command in rendered(result)
 
 
 def test_run_requires_a_command(tmp_path: Path) -> None:
@@ -77,7 +93,7 @@ def test_replay_needs_a_tape(tmp_path: Path) -> None:
         app, ["run", "--mode", "replay", "--db", str(tmp_path / "a.db"), "--", "true"]
     )
     assert result.exit_code != 0
-    assert "--run" in result.output
+    assert "--run" in rendered(result)
 
 
 def test_replay_rejects_an_unknown_tape(tmp_path: Path) -> None:
@@ -86,7 +102,8 @@ def test_replay_rejects_an_unknown_tape(tmp_path: Path) -> None:
         ["run", "--mode", "replay", "--run", "NOPE", "--db", str(tmp_path / "a.db"), "--", "true"],
     )
     assert result.exit_code != 0
-    assert "no such run" in result.output
+    assert "nosuchrun" in rendered(result)  # whitespace is stripped; see rendered()
+    assert "NOPE" in rendered(result)
 
 
 def test_run_replay_creates_a_child_run_linked_to_the_tape(tmp_path: Path) -> None:

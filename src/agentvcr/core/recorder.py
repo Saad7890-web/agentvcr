@@ -64,8 +64,14 @@ def record_step(
     latency_ms: int,
     chunks: list[bytes] | None = None,
     started_at: str | None = None,
+    diverged: bool = False,
 ) -> Step:
-    """Persist one LLM call as the next step of ``run_id``."""
+    """Persist one LLM call as the next step of ``run_id``.
+
+    Used for both a recorded call and a replayed one: a replay step holds the request
+    the agent actually sent and the response the tape answered with, so the two runs
+    can be diffed. ``diverged`` marks a replay step whose request drifted from the tape.
+    """
     step = Step(
         run_id=run_id,
         idx=0,  # allocated under the store's write lock below
@@ -77,6 +83,7 @@ def record_step(
         usage=provider.usage_of(response) if response else None,
         latency_ms=latency_ms,
         status_code=status_code,
+        diverged=diverged,
         started_at=started_at or utcnow(),
     )
     return store.add_step(step, at_next_idx=True)
@@ -104,6 +111,8 @@ class RunRouter:
         self.idle_timeout_s = idle_timeout_s
         self.clock = clock
         self._active: dict[str, _ActiveRun] = {}
+        #: tape run id -> the replay run recording the session replaying it.
+        self._replays: dict[str, str] = {}
 
     # ------------------------------------------------------------------ resolving
 
@@ -138,10 +147,42 @@ class RunRouter:
         self._track(run.id, keys)
         return run
 
+    def replay_run_for(
+        self, run: Run, *, provider: Provider, upstream_url: str | None = None
+    ) -> Run:
+        """The run that records this replay session (DESIGN.md §4).
+
+        A replay is a run of its own so that divergence is recorded against it rather
+        than onto the tape, and so a recording can be diffed against its own replay.
+        ``agentvcr run --mode replay`` creates that run up front and points the agent at
+        it; a client that instead points straight at a *recorded* run gets one created
+        here on first call, for as long as the session stays warm.
+        """
+        if run.replay_of:
+            return run
+        existing = self._replays.get(run.id)
+        if existing is not None:
+            session = self.store.get_run(existing)
+            if session is not None:
+                self._track(session.id, [])
+                return session
+        session = self.store.create_run(
+            mode="replay",
+            replay_of=run.id,
+            name=run.name,
+            provider=provider.name,
+            upstream_url=upstream_url,
+        )
+        self._replays[run.id] = session.id
+        self._track(session.id, [])
+        return session
+
     def _chain(self, keys: list[str]) -> str | None:
         """The active run whose last message list is the longest prefix of ``keys``."""
         best: _ActiveRun | None = None
         for active in self._active.values():
+            if not active.keys:  # a replay session claims no conversation of its own
+                continue
             if len(active.keys) > len(keys) or keys[: len(active.keys)] != active.keys:
                 continue
             if len(active.keys) == len(keys) and not self._is_retry(active.run_id):
@@ -181,6 +222,9 @@ class RunRouter:
 
     def close(self, run_id: str, *, status: str = STATUS_COMPLETED) -> None:
         self._active.pop(run_id, None)
+        for tape, session in list(self._replays.items()):
+            if run_id in (tape, session):
+                self._replays.pop(tape, None)
         if self.store.get_run(run_id) is not None:
             self.store.update_run(run_id, status=status)
 

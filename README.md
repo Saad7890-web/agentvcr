@@ -16,10 +16,11 @@ Anthropic wire format works — including Groq, Gemini, OpenRouter, Ollama and v
 
 ## Status
 
-Early development. **Record mode works** (phase 1): the proxy forwards OpenAI-format
-calls to any compatible upstream, streaming included, and writes every step to a local
-SQLite tape you can list and inspect. Replay, fork, diff and the web UI land in phases
-2–5 — see [`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
+Early development. **Record and replay work** (phases 1–2): the proxy forwards
+OpenAI-format calls to any compatible upstream, streaming included, writes every step
+to a local SQLite tape — and replays that tape offline, for free, without ever
+contacting an upstream. Fork, diff and the web UI land in phases 3–5 — see
+[`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
 
 `/anthropic/*` is mounted but forwards unrecorded until phase 3.
 
@@ -51,12 +52,42 @@ client = OpenAI(base_url="http://localhost:8484/openai/v1")
 
 A complete example lives in [`examples/plain-loop/`](examples/plain-loop/).
 
+## Replay
+
+Replaying a recorded run costs nothing and needs no network:
+
+```bash
+agentvcr run --mode replay --run <run-id> -- python agent.py
+```
+
+Your agent runs again, unchanged, and every LLM call is answered from the tape by
+position — the *N*th call gets the *N*th recorded response. The replay is recorded as a
+run of its own, linked to the tape it came from, so the original recording is never
+written to and the two can be diffed later.
+
+Each request's fingerprint is also compared against the tape. A mismatch means the
+agent has drifted from what was recorded, and what happens then is
+`mismatch_policy`:
+
+| Policy | On a mismatch |
+|---|---|
+| `warn` (default) | serve the recorded response anyway, flag the step and the run as diverged |
+| `strict` | refuse with a `409` — the setting for CI |
+| `live-on-miss` | stop replaying and go live from that step onward (auto-fork) |
+
+Known limits: replay is deterministic at the LLM boundary, but your **tools still
+execute locally** — a tool with side effects will re-fire. And agents that issue LLM
+calls *concurrently* replay in whatever order the race lands, which shows up as
+divergence rather than as a silent wrong answer. Both are measured in
+[`examples/framework-check/`](examples/framework-check/).
+
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `agentvcr serve` | Start the proxy (`--preset groq\|gemini\|openai\|anthropic`, `--port`, `--db`) |
 | `agentvcr run -- <cmd>` | Create a run, point the child at the proxy, record it, store its argv |
+| `agentvcr run --mode replay --run <id> -- <cmd>` | Replay a tape offline; no upstream, no tokens |
 | `agentvcr runs` | List recorded runs, newest first |
 | `agentvcr show <run>` | Step table for one run (`--json` for the machine-readable form) |
 

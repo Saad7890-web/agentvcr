@@ -63,7 +63,7 @@ add-on for users who want it.
 | Mode | Upstream called? | Behavior |
 |---|---|---|
 | `record` | yes | Transparent passthrough; every request/response persisted as a step in a run. |
-| `replay` | **no** | Serves recorded responses positionally. Free, offline, deterministic. |
+| `replay` | **no** | Serves recorded responses positionally. Free, offline, deterministic. Recorded as a run of its own (§4). |
 | `fork` | after fork point | Replays the tape up to the fork/edit point, then goes live against the real API (recording the new branch as a child run). |
 | `passthrough` | yes | Pure proxy, no recording (escape hatch). |
 
@@ -94,6 +94,26 @@ derived, see §2). Two ways a request is assigned to a run:
    run starts. An idle timeout closes runs. Good enough for the drop-in demo; the
    explicit path is what docs recommend for CI.
 
+**A replay is a run of its own.** Replaying tape *R* creates a new run with
+`replay_of = R`, and the requests the agent sends plus the responses served back are
+recorded onto it exactly as a recording would be. Three things fall out of this:
+
+- **The tape is never written to.** Divergence is a property of *this replay*, not of
+  the recording — marking the original would corrupt the very thing being replayed.
+- **The position needs no session counter.** The *N*th call is answered with tape step
+  *N* where *N* is simply how many steps the replay run has recorded so far, which
+  survives a proxy restart and cannot drift.
+- **A run can be diffed against its own replay** (§7), which is how a replay proves it
+  reproduced the recording rather than merely not crashing.
+
+Replay lineage is deliberately separate from fork lineage (`parent_run_id`): a fork
+*branches away* from a tape and generates new content, a replay *re-derives* one.
+
+`agentvcr run --mode replay --run <tape>` creates that replay run up front and points
+the agent at it. A client that instead points straight at a recorded run and asks for
+replay mode by header gets one created on first call, for as long as the session stays
+warm — same zero-config ergonomics as the grouping heuristic, and just as advisory.
+
 ## 5. Replay matching
 
 - **Primary: positional.** The *N*th LLM call of the session gets the *N*th recorded
@@ -105,20 +125,36 @@ derived, see §2). Two ways a request is assigned to a run:
   - `warn` (default): serve the positional response, mark the step as *diverged*.
   - `strict`: return a structured 409 error (for CI).
   - `live-on-miss`: fall through to the real API from that point, i.e. auto-fork.
-- **Streaming:** if the client asked for `stream: true`, the proxy re-emits the recorded
-  response as SSE chunks (synthesized from the stored final message; optionally the raw
-  recorded chunk sequence). Recorded streams are always accumulated into a final
-  message at record time so both stream and non-stream replay work from one tape.
+- **Streaming:** if the client asked for `stream: true`, the proxy prefers the **raw
+  recorded chunk sequence** — replaying the provider's own bytes, byte-for-byte. Only
+  when no chunk tape was kept (`record_chunks = false`) is the stream synthesized from
+  the stored final message: faithful in content, but the ids and chunk boundaries are
+  ours, so byte-identity is a property of the raw tape, not of replay in general.
+  Recorded streams are always accumulated into a final message at record time as well,
+  so one tape answers both a streaming and a non-streaming client.
 - **Errors and retries.** A non-2xx upstream response is recorded as a step like any
   other, with its status code. Both SDKs retry 429/500 by default, so one logical call
   can produce two steps — and because the failure is on the tape, positional replay
   reproduces the same 429-then-success sequence the client already knows how to handle.
   Recording only successes would desynchronize every later step. A request that never
   reaches the provider (connection refused, DNS failure) is *not* recorded: there is no
-  response to serve back, and the proxy answers 502.
+  response to serve back, and the proxy answers 502. The cost of this fidelity is that
+  a replay reproduces the *client's* retry loop too, backoff sleeps included — and that
+  the tape is coupled to the client's retry configuration, since an agent replayed with
+  a different `max_retries` consumes the tape at a different rate. A policy to skip
+  recorded error steps on replay is post-MVP.
 - **Concurrency note (post-MVP):** parallel LLM calls (multi-agent fan-out) break pure
   positional order → matching falls back to fingerprint-first with position as
   tiebreak. Flagged for milestone 7, not the MVP.
+
+  This is measured, not assumed. `examples/framework-check/` records and replays a real
+  LangGraph agent against a scripted upstream that is then killed. A sequential ReAct
+  loop replays perfectly, with no fingerprint divergence at all. A graph whose branches
+  fan out in one superstep replays *nondeterministically* — over five runs the replay
+  raced the other way twice, and each branch then received the other's answer. Both
+  times the fingerprint check caught it: every step flagged, the replay run marked
+  `diverged`. A replay of a fan-out agent may be wrong; it is never quietly wrong, and
+  that is the property that makes shipping the MVP without fan-out support defensible.
 
 ## 6. Fork & edit semantics
 
@@ -159,6 +195,14 @@ the agent's decisions in 12 of 40 recorded runs").
 `.agentvcr/agentvcr.db` in the project directory (overridable via `--db` /
 `AGENTVCR_DB`). Plain `sqlite3` with a tiny migration runner — no ORM.
 
+**Known growth characteristic.** `steps.request_json` holds the whole request, and
+every request contains the entire conversation so far, so a run's storage is quadratic
+in its length: a 100-step run over a 50k-token context stores that history 100 times.
+Acceptable for the runs people actually debug, and the shape stays honest and trivially
+diffable. If it starts to hurt, the fix is content-hashing message bodies into a shared
+table (or storing per-step message deltas) behind the same `Step` dataclass — which is
+also the question the export format (`.vcr.json`) has to answer.
+
 ```sql
 runs(
   id TEXT PRIMARY KEY,            -- short ulid
@@ -167,6 +211,7 @@ runs(
   mode TEXT,                      -- record | replay | fork
   parent_run_id TEXT,             -- fork lineage
   fork_step INTEGER,
+  replay_of TEXT,                 -- replay lineage: the tape this run replays (§4)
   command TEXT,                   -- argv if launched via `agentvcr run`
   provider TEXT, upstream_url TEXT,
   status TEXT,                    -- active | completed | diverged
@@ -181,7 +226,8 @@ steps(
   response_chunks BLOB,           -- optional raw SSE tape
   fingerprint TEXT,               -- normalized-request hash
   model TEXT, usage_json TEXT, latency_ms INTEGER,
-  diverged INTEGER DEFAULT 0,
+  diverged INTEGER DEFAULT 0,     -- set on a *replay* step that drifted from its tape
+  status_code INTEGER,            -- upstream HTTP status; errors are steps too (§5)
   started_at TEXT
 )
 

@@ -62,19 +62,43 @@ at the proxy, Groq free tier as upstream) runs unmodified except `base_url`, and
 
 The zero-token payoff; this is what makes the project real.
 
-- [ ] `core/replayer.py`: positional matching, fingerprint comparison, policies
+- [x] `core/replayer.py`: positional matching, fingerprint comparison, policies
       `warn` / `strict` / `live-on-miss` (DESIGN.md §5); mark diverged steps
-- [ ] SSE synthesis: serve recorded response as a stream when the client asks for one
-- [ ] Structured error when the tape runs out of steps
-- [ ] `agentvcr run --mode replay --run <id> -- <cmd>` wires it together
-- [ ] **Golden round-trip test:** record the example agent against a mocked upstream →
+- [x] SSE replay: raw recorded chunks when they were kept, synthesis from the stored
+      final message otherwise; one tape answers streaming and non-streaming clients
+- [x] Structured error when the tape runs out of steps
+- [x] `agentvcr run --mode replay --run <id> -- <cmd>` wires it together
+- [x] **Golden round-trip test:** record the example agent against a mocked upstream →
       replay with the network fully disabled → transcript and final answer identical
 
-**Done when:** the Phase 1 example replays offline (`--mode replay`), byte-identical at
-the LLM boundary, with zero upstream requests.
+Folded in while building (decisions from the Phase 1 design review):
+
+- [x] **A replay is a run of its own** (`replay_of`, DESIGN.md §4). Without it there was
+      nowhere to put divergence but the tape itself, and nothing to diff a recording
+      against in Phase 3
+- [x] Replay never contacts an upstream, not even for paths it cannot serve (an
+      unrecorded `GET /models` under replay is a structured 501, not a forward)
+- [x] An unknown `X-AgentVCR-Mode` is a 400 — it used to fall through to an unrecorded
+      passthrough, which looks exactly like recording that silently kept nothing
+- [x] Run grouping: an exact repeat of a request chains onto its run only when the last
+      step *failed* (an SDK retry). Two copies of one agent starting from the same
+      prompt used to land on a single tape
+
+**Done when:** the Phase 1 example replays offline (`--mode replay`) with zero upstream
+requests, reproducing the recorded transcript step for step — byte-identically where a
+raw chunk tape exists. **Done** — `tests/test_replay.py` replays with respx registering
+no routes at all, so any upstream call raises rather than quietly succeeding.
 
 ## Phase 3 — Anthropic format + tool timeline + diff (week 2)
 
+- [x] **Framework reality check, first thing.** Positional matching assumes strictly
+      sequential LLM calls, and a framework is where that assumption breaks. Pulled
+      ahead of Phase 6 so it cannot ambush launch week: `examples/framework-check/`
+      records and replays a real LangGraph agent against a scripted upstream that is
+      then killed. **Sequential agents replay perfectly, with zero divergence; parallel
+      fan-out replays nondeterministically (raced the other way in 2 of 5 runs) and is
+      flagged on every step when it does** (see that README, and DESIGN.md §5)
+- [ ] Same check for the OpenAI Agents SDK (`check.py --agent …`, no new harness needed)
 - [ ] `providers/anthropic_messages.py`: `POST /anthropic/v1/messages`, its SSE event
       accumulation, fingerprinting, record + replay parity with OpenAI (shared tests
       parameterized over providers)
@@ -115,16 +139,24 @@ step 9 → `agentvcr fork <run> --at 6 --edit-tool-result …` → re-run → pa
       (spawns the stored command with fork env — only for runs launched via
       `agentvcr run`)
 - [ ] Views in order of demo value: run list → timeline → step inspector →
-      edit-modal-creates-fork (+ Re-run button) → diff side-by-side
+      edit-modal-creates-fork (+ Re-run button) → diff side-by-side. **Ship the first
+      four**; the side-by-side diff can wait if the week runs out, since `agentvcr diff`
+      already covers it in the terminal
+- [ ] CI: the wheel job needs Node to build `ui/` — today it only installs Python
 - [ ] `agentvcr ui` opens the browser
 
 **Done when:** the 30-second GIF is recordable entirely in the UI: open failing run →
 click step 6 → edit tool result → Re-run → watch the forked run pass → open diff.
 
+**Fallback, decided up front:** the launch GIF must not be blocked on the UI. The
+headless demo script from Phase 4 is recordable in a terminal and tells the same story;
+if Phase 5 slips, the GIF ships from there and the UI lands in v0.2.
+
 ## Phase 6 — Polish & launch (week 4–5)
 
 - [ ] `examples/`: OpenAI Agents SDK, LangGraph, CrewAI — each a ≤50-line agent with a
-      README showing the one-line `base_url` change
+      README showing the one-line `base_url` change (the first two were already proven
+      to record and replay in Phase 3; this is polish, not discovery)
 - [ ] README: hero GIF, quickstart (`uvx agentvcr serve` + three commands), honest
       limitations section (tool re-execution, concurrency), `.gitignore` note for
       `.agentvcr/`

@@ -216,7 +216,7 @@ def test_passthrough_mode_records_nothing(proxy) -> None:
     assert proxy.store.list_runs() == []
 
 
-@pytest.mark.parametrize("mode,phase", [("replay", "2"), ("fork", "4")])
+@pytest.mark.parametrize("mode,phase", [("fork", "4")])
 def test_unimplemented_modes_answer_with_a_structured_error(proxy, mode, phase) -> None:
     response = proxy.client.post(
         "/openai/v1/chat/completions",
@@ -227,6 +227,22 @@ def test_unimplemented_modes_answer_with_a_structured_error(proxy, mode, phase) 
     body = response.json()["error"]
     assert body["type"] == "mode_not_implemented"
     assert f"Phase {phase}" in body["message"]
+
+
+@respx.mock
+def test_an_unknown_mode_is_an_error_not_a_silent_passthrough(proxy) -> None:
+    """A typo in the mode header must not look like recording while recording nothing."""
+    route = respx.post(CHAT).mock(return_value=httpx.Response(200, json=ANSWER))
+
+    response = proxy.client.post(
+        "/openai/v1/chat/completions",
+        json={"model": "m", "messages": []},
+        headers={"X-AgentVCR-Mode": "recrod"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "unknown_mode"
+    assert not route.called
 
 
 @respx.mock
@@ -295,13 +311,18 @@ def test_a_growing_conversation_is_grouped_into_one_run(proxy) -> None:
 
 @respx.mock
 def test_a_runs_own_mode_beats_the_server_default(proxy) -> None:
-    """`agentvcr run --mode replay` stores the mode on the run; the proxy honors it."""
-    proxy.store.create_run(mode="replay", run_id="REPLAYRUN")
+    """`agentvcr run --mode replay` stores the mode on the run; the proxy honors it.
+
+    The server default here is `record`, and nothing is mocked: reaching the upstream
+    at all would fail the test.
+    """
+    proxy.store.create_run(mode="record", run_id="EMPTYTAPE")
+    proxy.store.create_run(mode="replay", run_id="REPLAYRUN", replay_of="EMPTYTAPE")
 
     response = proxy.client.post(
         "/r/REPLAYRUN/openai/v1/chat/completions",
         json={"model": "m", "messages": []},
     )
 
-    assert response.status_code == 501
-    assert response.json()["error"]["type"] == "mode_not_implemented"
+    assert response.status_code == 409
+    assert response.json()["error"]["type"] == "tape_exhausted"

@@ -12,8 +12,8 @@ the run travels in the base URL, so an unmodified client carries it for free. Fa
 both, the grouping heuristic in :mod:`agentvcr.core.recorder` chains the call onto a
 run by message prefix.
 
-Phase 1 implements ``record`` and ``passthrough``; ``replay`` and ``fork`` answer with
-a structured 501 until Phases 2 and 4 land.
+Phases 1–2 implement ``record``, ``replay`` and ``passthrough``; ``fork`` answers with
+a structured 501 until Phase 4 lands.
 """
 
 from __future__ import annotations
@@ -27,7 +27,9 @@ import httpx
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from ..config import Settings
+from ..config import MODES, Settings
+from ..core import replayer
+from ..core.models import STATUS_DIVERGED, Run
 from ..core.recorder import RunRouter, record_step
 from ..core.store import Store, utcnow
 from ..providers import Provider, get_provider
@@ -36,8 +38,11 @@ RUN_HEADER = "x-agentvcr-run"
 MODE_HEADER = "x-agentvcr-mode"
 
 MODE_RECORD = "record"
+MODE_REPLAY = "replay"
 MODE_PASSTHROUGH = "passthrough"
-_UNIMPLEMENTED_MODES = {"replay": 2, "fork": 4}
+#: Modes the tape can be captured or served for; the rest is a plain proxy.
+_TAPE_MODES = (MODE_RECORD, MODE_REPLAY)
+_UNIMPLEMENTED_MODES = {"fork": 4}
 
 _PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
 
@@ -95,13 +100,17 @@ async def _dispatch(
     explicit_run_id = path_run_id or request.headers.get(RUN_HEADER)
     mode = _resolve_mode(request, store, settings, explicit_run_id)
 
+    if mode not in MODES:
+        # Silently proxying an unknown mode would look like recording and record
+        # nothing, so a typo in X-AgentVCR-Mode is an error, not a default.
+        return _error(400, "unknown_mode", f"unknown mode {mode!r}; expected one of {list(MODES)}")
     unimplemented_phase = _UNIMPLEMENTED_MODES.get(mode)
     if unimplemented_phase is not None:
         return _error(
             501,
             "mode_not_implemented",
             f"mode {mode!r} lands in Phase {unimplemented_phase} (PLAN.md); "
-            f"this build implements 'record' and 'passthrough'",
+            f"this build implements 'record', 'replay' and 'passthrough'",
         )
 
     body = await request.body()
@@ -111,10 +120,18 @@ async def _dispatch(
     )
 
     parsed: dict[str, Any] | None = None
-    if is_recorded_path and mode == MODE_RECORD:
+    if is_recorded_path and mode in _TAPE_MODES:
         parsed = _parse_json_object(body)
 
     if parsed is None:
+        if mode == MODE_REPLAY:
+            # Replay never contacts an upstream, not even for the calls it cannot serve.
+            return _error(
+                501,
+                "not_replayable",
+                f"{request.method} {request.url.path} is not recorded, and replay mode "
+                f"has no upstream to forward it to",
+            )
         return await _forward(request, client, upstream, body, recorded=False)
 
     router: RunRouter = request.app.state.run_router
@@ -125,6 +142,10 @@ async def _dispatch(
         run_id=explicit_run_id,
         upstream_url=settings.upstream_for(provider.name),
     )
+    if mode == MODE_REPLAY:
+        return await _replay(
+            request, client, upstream, body, provider=provider, run=run, parsed=parsed
+        )
     if provider.is_streaming(parsed):
         return await _forward_streaming_recorded(
             request, client, upstream, body, provider=provider, run_id=run.id, parsed=parsed
@@ -291,6 +312,94 @@ async def _forward_streaming_recorded(
         status_code=upstream.status_code,
         headers=headers,
         media_type=upstream.headers.get("content-type", "text/event-stream"),
+    )
+
+
+# ----------------------------------------------------------------------------- replay
+
+
+async def _replay(
+    request: Request,
+    client: httpx.AsyncClient,
+    url: str,
+    body: bytes,
+    *,
+    provider: Provider,
+    run: Run,
+    parsed: dict[str, Any],
+) -> Response:
+    """Answer from the tape — no upstream, no tokens (DESIGN.md §5).
+
+    The replay is recorded as a run of its own, so the served step, its position and
+    any divergence belong to the replay rather than to the recording it came from.
+    """
+    store: Store = request.app.state.store
+    settings: Settings = request.app.state.settings
+    router: RunRouter = request.app.state.run_router
+
+    try:
+        replayer.assert_replayable(run)
+        session = router.replay_run_for(
+            run, provider=provider, upstream_url=settings.upstream_for(provider.name)
+        )
+        served = replayer.next_from_tape(
+            store,
+            replay_run=session,
+            provider=provider,
+            body=parsed,
+            policy=settings.mismatch_policy,
+        )
+    except replayer.ReplayError as exc:
+        return _replay_error(exc)
+
+    if served is None:
+        # `live-on-miss` policy: the tape stops here, the branch continues for real.
+        if provider.is_streaming(parsed):
+            return await _forward_streaming_recorded(
+                request, client, url, body, provider=provider, run_id=session.id, parsed=parsed
+            )
+        return await _forward_recorded(
+            request, client, url, body, provider=provider, run_id=session.id, parsed=parsed
+        )
+
+    started_at, started = utcnow(), time.perf_counter()
+    streaming = provider.is_streaming(parsed)
+    content, media_type = replayer.response_body(served.step, provider, streaming=streaming)
+    status_code = served.step.status_code or 200
+
+    step = record_step(
+        store,
+        run_id=session.id,
+        provider=provider,
+        request_headers=request.headers,
+        request_body=parsed,
+        response=served.step.response,
+        status_code=status_code,
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        started_at=started_at,
+        diverged=served.diverged,
+    )
+    if served.diverged:
+        store.update_run(session.id, status=STATUS_DIVERGED)
+
+    headers = {
+        "Content-Type": media_type,
+        "X-AgentVCR-Recorded": "false",
+        "X-AgentVCR-Replayed": "true",
+        "X-AgentVCR-Run": session.id,
+        "X-AgentVCR-Tape": served.step.run_id,
+        "X-AgentVCR-Step": str(step.idx),
+        "X-AgentVCR-Diverged": "true" if served.diverged else "false",
+    }
+    return Response(content=content, status_code=status_code, headers=headers)
+
+
+def _replay_error(exc: replayer.ReplayError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {"type": exc.code, "message": exc.message, "by": "agentvcr", **exc.details}
+        },
     )
 
 

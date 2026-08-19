@@ -72,6 +72,56 @@ def test_run_records_argv_and_points_the_child_at_the_proxy(tmp_path: Path) -> N
     assert env["ANTHROPIC_BASE_URL"] == f"http://127.0.0.1:8484/r/{run.id}/anthropic"
 
 
+def test_replay_needs_a_tape(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["run", "--mode", "replay", "--db", str(tmp_path / "a.db"), "--", "true"]
+    )
+    assert result.exit_code != 0
+    assert "--run" in result.output
+
+
+def test_replay_rejects_an_unknown_tape(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["run", "--mode", "replay", "--run", "NOPE", "--db", str(tmp_path / "a.db"), "--", "true"],
+    )
+    assert result.exit_code != 0
+    assert "no such run" in result.output
+
+
+def test_run_replay_creates_a_child_run_linked_to_the_tape(tmp_path: Path) -> None:
+    """The agent is pointed at a fresh replay run, never at the tape itself."""
+    db = tmp_path / "a.db"
+    with Store.open(db) as store:
+        store.create_run(mode="record", run_id="TAPE")
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--mode",
+            "replay",
+            "--run",
+            "TAPE",
+            "--db",
+            str(db),
+            "--",
+            sys.executable,
+            "-c",
+            "import os; assert '/r/' in os.environ['OPENAI_BASE_URL']",
+        ],
+    )
+    assert result.exit_code == 0
+
+    with Store.open(db) as store:
+        session = next(r for r in store.list_runs() if r.id != "TAPE")
+    assert session.mode == "replay"
+    assert session.replay_of == "TAPE"
+    assert f"/r/{session.id}" in result.output  # the child is pointed at the replay run
+    assert "replaying TAPE" in result.output
+    assert "replayed 0 step(s)" in result.output
+
+
 def test_run_propagates_the_child_exit_code(tmp_path: Path) -> None:
     db = tmp_path / "a.db"
     result = runner.invoke(

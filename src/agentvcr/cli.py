@@ -1,7 +1,7 @@
 """``agentvcr`` command line.
 
-Phase 1 ships ``serve``, ``run``, ``runs`` and ``show``; ``fork``, ``diff`` and ``ui``
-arrive with the phases that give them something to do.
+Phases 1–2 ship ``serve``, ``run``, ``runs`` and ``show``; ``fork``, ``diff`` and
+``ui`` arrive with the phases that give them something to do.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import typer
 
 from . import __version__
 from .config import MISMATCH_POLICIES, MODES, PRESETS, ConfigError, Settings, load_settings
-from .core.models import STATUS_COMPLETED, Run, Step
+from .core.models import STATUS_COMPLETED, STATUS_DIVERGED, Run, Step
 from .core.store import Store
 from .providers import get_provider
 
@@ -109,6 +109,9 @@ def run(
     ctx: typer.Context,
     name: str | None = typer.Option(None, "--name", help="Human label for the run."),
     mode: str | None = typer.Option(None, "--mode", help=f"Run mode: {'|'.join(MODES)}."),
+    tape: str | None = typer.Option(
+        None, "--run", metavar="RUN", help="Tape to replay (required by --mode replay)."
+    ),
     db: Path | None = DB_OPTION,
     config: Path | None = CONFIG_OPTION,
 ) -> None:
@@ -117,6 +120,10 @@ def run(
     The run id travels in the base URL (``/r/<id>/openai/v1``), so the agent needs no
     header support and no code change beyond reading ``OPENAI_BASE_URL`` — which both
     official SDKs already do.
+
+    ``--mode replay --run <id>`` replays an existing tape instead: the child is pointed
+    at a fresh *replay* run linked to that tape, so the replay is recorded in its own
+    right and the original recording is never written to.
     """
     command = list(ctx.args)
     if not command:
@@ -126,8 +133,15 @@ def run(
     host = "127.0.0.1" if settings.host in {"0.0.0.0", "::"} else settings.host
     base = f"http://{host}:{settings.port}"
 
+    if settings.mode == "replay" and tape is None:
+        raise typer.BadParameter("--mode replay needs a tape: agentvcr run --mode replay --run ID")
+    if tape is not None and settings.mode != "replay":
+        raise typer.BadParameter(f"--run is for replaying a tape; mode is {settings.mode!r}")
+
     with _store(settings) as store:
-        created = store.create_run(mode=settings.mode, name=name, command=command)
+        if tape is not None and store.get_run(tape) is None:
+            raise typer.BadParameter(f"no such run to replay: {tape}")
+        created = store.create_run(mode=settings.mode, name=name, command=command, replay_of=tape)
         env = {
             **os.environ,
             "AGENTVCR_RUN": created.id,
@@ -135,7 +149,8 @@ def run(
             "OPENAI_BASE_URL": f"{base}/r/{created.id}/openai/v1",
             "ANTHROPIC_BASE_URL": f"{base}/r/{created.id}/anthropic",
         }
-        typer.echo(f"run {created.id} — mode={settings.mode} via {base}/r/{created.id}")
+        via = f" replaying {tape}" if tape else ""
+        typer.echo(f"run {created.id} — mode={settings.mode}{via} via {base}/r/{created.id}")
         if not _server_is_up(base):
             typer.secho(
                 f"warning: nothing is listening on {base}; start `agentvcr serve` first",
@@ -148,14 +163,18 @@ def run(
             store.update_run(created.id, status="failed")
             raise typer.BadParameter(f"cannot run {command[0]!r}: {exc}") from exc
 
+        # Re-read: the proxy may have written to this run while the child was alive
+        # (a live-on-miss replay records where it went live), and that must survive.
+        final = store.get_run(created.id) or created
         store.update_run(
             created.id,
-            status=STATUS_COMPLETED,
-            meta={"exit_code": completed.returncode},
+            status=final.status if final.status == STATUS_DIVERGED else STATUS_COMPLETED,
+            meta={**final.meta, "exit_code": completed.returncode},
         )
         steps = store.count_steps(created.id)
 
-    typer.echo(f"recorded {steps} step(s) — agentvcr show {created.id}")
+    verb = "replayed" if settings.mode == "replay" else "recorded"
+    typer.echo(f"{verb} {steps} step(s) — agentvcr show {created.id}")
     raise typer.Exit(completed.returncode)
 
 
@@ -225,6 +244,10 @@ def show(
             typer.echo(f"  command {' '.join(target.command)}")
         if target.parent_run_id:
             typer.echo(f"  forked from {target.parent_run_id} at step {target.fork_step}")
+        if target.replay_of:
+            live_from = target.meta.get("live_from")
+            went_live = f", live from step {live_from}" if live_from is not None else ""
+            typer.echo(f"  replay of {target.replay_of}{went_live}")
         if not steps:
             typer.echo("  (no steps recorded)")
             return
@@ -266,7 +289,11 @@ def _row(widths: tuple[int, ...], *cells: str) -> str:
 
 
 def _run_label(item: Run) -> str:
-    return item.name or ("fork" if item.parent_run_id else "-")
+    if item.name:
+        return item.name
+    if item.parent_run_id:
+        return "fork"
+    return f"replay of {item.replay_of}" if item.replay_of else "-"
 
 
 def _first_model(steps: list[Step]) -> str:

@@ -87,6 +87,28 @@ def test_fork_lineage_tool_calls_and_edits(store: Store) -> None:
     assert edit.patch == {"flights": [1]}
 
 
+def test_replay_lineage_is_separate_from_fork_lineage(store: Store) -> None:
+    """A replay re-derives a tape; a fork branches away from one. Different columns."""
+    tape = store.create_run(mode="record")
+    replay = store.create_run(mode="replay", replay_of=tape.id)
+
+    assert store.get_run(replay.id).replay_of == tape.id
+    assert store.get_run(replay.id).parent_run_id is None
+    assert store.list_runs(parent_run_id=tape.id) == []
+
+
+def test_last_step_is_the_highest_indexed_one(store: Store) -> None:
+    run = store.create_run(mode="record")
+    assert store.last_step(run.id) is None
+
+    store.add_step(Step(run_id=run.id, idx=0, request={}, status_code=200))
+    store.add_step(Step(run_id=run.id, idx=1, request={}, status_code=429))
+
+    last = store.last_step(run.id)
+    assert last.idx == 1
+    assert last.ok is False
+
+
 def test_deleting_a_run_cascades(store: Store) -> None:
     run = store.create_run(mode="record")
     store.add_step(Step(run_id=run.id, idx=0, request={}))

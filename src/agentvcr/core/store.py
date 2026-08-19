@@ -102,6 +102,13 @@ MIGRATIONS: list[str] = [
     """
     ALTER TABLE steps ADD COLUMN status_code INTEGER;
     """,
+    # v3 — replay lineage. A replay is a run of its own, linked to the tape it served
+    # from, so divergence is recorded against the replay instead of scribbled onto the
+    # original recording, and a run can be diffed against its own replay (DESIGN.md §4).
+    """
+    ALTER TABLE runs ADD COLUMN replay_of TEXT REFERENCES runs(id) ON DELETE SET NULL;
+    CREATE INDEX idx_runs_replay_of ON runs(replay_of);
+    """,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
@@ -196,6 +203,7 @@ class Store:
         name: str | None = None,
         parent_run_id: str | None = None,
         fork_step: int | None = None,
+        replay_of: str | None = None,
         command: list[str] | None = None,
         provider: str | None = None,
         upstream_url: str | None = None,
@@ -209,6 +217,7 @@ class Store:
             name=name,
             parent_run_id=parent_run_id,
             fork_step=fork_step,
+            replay_of=replay_of,
             command=command,
             provider=provider,
             upstream_url=upstream_url,
@@ -250,6 +259,7 @@ class Store:
             "command",
             "parent_run_id",
             "fork_step",
+            "replay_of",
             "meta_json",
         }
         unknown = set(fields) - allowed
@@ -284,6 +294,12 @@ class Store:
         ).fetchone()
         return Step.from_row(row) if row else None
 
+    def last_step(self, run_id: str) -> Step | None:
+        row = self.conn.execute(
+            "SELECT * FROM steps WHERE run_id = ? ORDER BY idx DESC LIMIT 1", (run_id,)
+        ).fetchone()
+        return Step.from_row(row) if row else None
+
     def list_steps(self, run_id: str) -> list[Step]:
         rows = self.conn.execute(
             "SELECT * FROM steps WHERE run_id = ? ORDER BY idx", (run_id,)
@@ -295,6 +311,7 @@ class Store:
         return int(row[0])
 
     def mark_diverged(self, run_id: str, idx: int) -> None:
+        """Flag a *replay* step whose request drifted from the tape (DESIGN.md §5)."""
         with self._lock:
             self.conn.execute(
                 "UPDATE steps SET diverged = 1 WHERE run_id = ? AND idx = ?", (run_id, idx)

@@ -45,6 +45,10 @@ class Run:
     name: str | None = None
     parent_run_id: str | None = None
     fork_step: int | None = None
+    #: Tape this run replays, when it is a replay run. Replay lineage is deliberately
+    #: separate from fork lineage: a replay re-derives an existing tape, a fork branches
+    #: away from one (DESIGN.md §4).
+    replay_of: str | None = None
     command: list[str] | None = None
     provider: str | None = None
     upstream_url: str | None = None
@@ -60,6 +64,7 @@ class Run:
             name=row["name"],
             parent_run_id=row["parent_run_id"],
             fork_step=row["fork_step"],
+            replay_of=row["replay_of"],
             command=_loads(row["command"]),
             provider=row["provider"],
             upstream_url=row["upstream_url"],
@@ -75,6 +80,7 @@ class Run:
             "mode": self.mode,
             "parent_run_id": self.parent_run_id,
             "fork_step": self.fork_step,
+            "replay_of": self.replay_of,
             "command": _dumps(self.command),
             "provider": self.provider,
             "upstream_url": self.upstream_url,
@@ -101,6 +107,8 @@ class Step:
     latency_ms: int | None = None
     #: Upstream HTTP status. Errors are recorded as steps so a retry sequence replays.
     status_code: int | None = None
+    #: Set on a *replay* step whose request no longer matches the tape it was served
+    #: from. Never written to the tape being replayed (DESIGN.md §5).
     diverged: bool = False
     started_at: str | None = None
     id: int | None = None

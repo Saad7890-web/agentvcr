@@ -146,8 +146,10 @@ are the automated form of the check.
 
 The killer feature, per DESIGN.md §6.
 
-- [ ] `core/forker.py`: create child run (copy prefix, set `parent_run_id`/`fork_step`),
-      store edits
+- [ ] `core/forker.py`: create child run (set `parent_run_id` / `fork_step`, **no copied
+      steps** — see below), store edits
+- [ ] Generalize tape resolution in `core/replayer.py`: a fork finds its tape through
+      `parent_run_id` the way a replay finds one through `replay_of`
 - [ ] Fork mode in the proxy: replay prefix → serve edited response at the edit step →
       go live and record the new branch; outbound request patching for tool-result and
       prompt edits
@@ -156,6 +158,14 @@ The killer feature, per DESIGN.md §6.
 - [ ] Tests: fork with edited assistant response changes the branch; fork with edited
       tool result patches the outbound request (assert on mocked upstream's received
       body); lineage recorded
+
+**A fork run accumulates its own steps; it never starts with a copy of the prefix.**
+Position on a tape is how many steps the run being served has recorded so far
+(`core/replayer.py`, DESIGN.md §4) — a fork pre-loaded with *k* prefix rows would have
+its *first* call answered with tape step *k*, and every step of the prefix replay would
+be off by *k*. The prefix is *replayed onto* the child exactly as a replay run
+accumulates it, so `fork_step` records where the branch leaves the tape, not how many
+rows were pre-inserted.
 
 **Done when:** the demo script works end-to-end headlessly: example agent "fails" at
 step 9 → `agentvcr fork <run> --at 6 --edit-tool-result …` → re-run → passes, and
@@ -172,6 +182,10 @@ step 9 → `agentvcr fork <run> --at 6 --edit-tool-result …` → re-run → pa
       edit-modal-creates-fork (+ Re-run button) → diff side-by-side. **Ship the first
       four**; the side-by-side diff can wait if the week runs out, since `agentvcr diff`
       already covers it in the terminal
+- [ ] Refuse cross-origin calls to `/api/*` (`Origin` check, or a token minted into the
+      URL `agentvcr ui` opens), **in the same commit that adds the routes**. Any page the
+      user's browser visits can reach `localhost:8484`; the tapes hold whole prompts and
+      `POST rerun` spawns a stored command line
 - [ ] CI: the wheel job needs Node to build `ui/` — today it only installs Python
 - [ ] `agentvcr ui` opens the browser
 
@@ -190,6 +204,10 @@ if Phase 5 slips, the GIF ships from there and the UI lands in v0.2.
 - [ ] README: hero GIF, quickstart (`uvx agentvcr serve` + three commands), honest
       limitations section (tool re-execution, concurrency), `.gitignore` note for
       `.agentvcr/`
+- [ ] `agentvcr rm <run>…` (with `--before <date>`): nothing in phases 0–5 deletes a
+      tape and storage is quadratic in run length (DESIGN.md §8), so a first user who
+      records a 200-step run has no way out but `rm -rf .agentvcr/`. The schema already
+      cascades, so this is small — it just has to exist before launch
 - [ ] Package QA: `pip install agentvcr` from TestPyPI on a clean machine; version
       pinning; `--help` text pass
 - [ ] Publish to PyPI; tag v0.1.0
@@ -216,6 +234,10 @@ Ordered by expected pull, not effort:
    frozen during replay, not just LLM calls.
 6. **Export/import tapes** (single-file `.vcr.json`) → foundation for shareable run
    links, i.e. the hosted open-core product.
+7. **Skip recorded error steps on replay** — a policy that serves past a recorded
+   429/500 instead of reproducing the client's retry loop, backoff sleeps included, and
+   that decouples a tape from the `max_retries` the recording client happened to use
+   (DESIGN.md §5 promises this policy and had nowhere to point).
 
 ## Standing decisions (so we don't relitigate)
 

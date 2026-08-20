@@ -147,9 +147,10 @@ warm — same zero-config ergonomics as the grouping heuristic, and just as advi
   positional order → matching falls back to fingerprint-first with position as
   tiebreak. Flagged for milestone 7, not the MVP.
 
-  This is measured, not assumed. `examples/framework-check/` records and replays a real
-  LangGraph agent against a scripted upstream that is then killed. A sequential ReAct
-  loop replays perfectly, with no fingerprint divergence at all. A graph whose branches
+  This is measured, not assumed. `examples/framework-check/` records and replays real
+  framework agents — LangGraph and the OpenAI Agents SDK — against a scripted upstream
+  that is then killed. Both sequential agents replay perfectly, with no fingerprint
+  divergence at all. A LangGraph graph whose branches
   fan out in one superstep replays *nondeterministically* — over five runs the replay
   raced the other way twice, and each branch then received the other's answer. Both
   times the fingerprint check caught it: every step flagged, the replay run marked
@@ -179,16 +180,33 @@ result → re-run → agent passes.* Re-running executes the user's own agent pr
 
 ## 7. Diffing
 
-Align two runs (LCS over step fingerprints, positional fallback), then per aligned
-step: message-level diff of requests, text/JSON diff of responses, and tool
-name/args/result diffs. Two consumers:
+Align two runs (LCS over step fingerprints, positional fallback within a stretch where
+nothing matched), then per aligned step: message-level diff of requests, response text
+and tool-call diffs, tool name/args/result diffs, and HTTP status.
+
+Two decisions shape what comes out:
+
+- **Comparison is semantic, not byte-level.** Any two live calls to one model differ in
+  their response id, their timestamp and usually their token counts. Reporting those
+  leaves no signal for the question actually being asked — *did the agent decide
+  something different?* — so they are not compared.
+- **A changed request message is reported once**, at the step that introduced it. Every
+  request carries the whole conversation, so a single edited system prompt is present
+  in all forty steps that follow it; reporting it forty times buries the rest. The
+  first occurrence is also, by construction, the step the runs diverge at.
+
+Within one step, changes are ordered most-explanatory first: a tool that returned
+something else *causes* the request message carrying it to differ, and saying so is
+more use than saying a message changed.
+
+Three consumers:
 
 - `agentvcr diff <runA> <runB>` — colored terminal summary: *"runs diverge at step 6
-  (tool `search_flights` returned different results)"*.
+  (tool `search_flights` returned different results)"*. Exits 1 on a difference, like
+  `diff(1)`.
 - UI side-by-side view with per-step drill-down.
-
-This is also the engine behind the eventual CI feature ("your prompt change altered
-the agent's decisions in 12 of 40 recorded runs").
+- The CI feature that exit code is for ("your prompt change altered the agent's
+  decisions in 12 of 40 recorded runs").
 
 ## 8. Storage schema (SQLite)
 

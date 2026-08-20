@@ -98,19 +98,49 @@ no routes at all, so any upstream call raises rather than quietly succeeding.
       then killed. **Sequential agents replay perfectly, with zero divergence; parallel
       fan-out replays nondeterministically (raced the other way in 2 of 5 runs) and is
       flagged on every step when it does** (see that README, and DESIGN.md §5)
-- [ ] Same check for the OpenAI Agents SDK (`check.py --agent …`, no new harness needed)
-- [ ] `providers/anthropic_messages.py`: `POST /anthropic/v1/messages`, its SSE event
+- [x] Same check for the OpenAI Agents SDK (`check.py --agent …`, no new harness needed).
+      **Records and replays clean**: two steps, zero fingerprint drift, zero network
+      calls with the upstream process dead. Two of its defaults had to be turned off in
+      the agent, and both are worth knowing about: it speaks the Responses API unless
+      told otherwise (agentvcr does not, yet — post-MVP item 3), and its tracing
+      uploads to api.openai.com, which would make "the replay reached the network zero
+      times" false for a reason unrelated to replay
+- [x] `providers/anthropic_messages.py`: `POST /anthropic/v1/messages`, its SSE event
       accumulation, fingerprinting, record + replay parity with OpenAI (shared tests
-      parameterized over providers)
-- [ ] `core/tools.py`: extract tool calls/results by diffing consecutive request
+      parameterized over providers, `tests/test_providers.py`)
+- [x] `core/tools.py`: extract tool calls/results by diffing consecutive request
       message lists (DESIGN.md §2); materialize into `tool_calls` at record time;
       `agentvcr show` now renders the interleaved LLM/tool timeline
-- [ ] `core/differ.py` + `agentvcr diff <a> <b>`: LCS alignment over fingerprints,
+- [x] `core/differ.py` + `agentvcr diff <a> <b>`: LCS alignment over fingerprints,
       per-step message/response/tool diffs, "diverges at step N" summary
+
+Folded in while building (decisions from the Phase 2 design review, and what the second
+wire format turned up):
+
+- [x] **A diff compares behavior, not bytes.** Two live calls to one model differ in
+      their response id, timestamp and token counts; reporting those leaves no signal
+      for the question actually being asked. Steps are compared on request messages,
+      response text, tool calls, tool results and status
+- [x] **A changed request message is reported once**, at the step that introduced it.
+      Every request carries the whole conversation, so one edited system prompt
+      otherwise reappears in all forty steps after it and buries everything else
+- [x] `agentvcr diff` exits 1 on a difference, like `diff(1)` — that is what lets a
+      strict replay in CI gate on the runs still matching, which is post-MVP item 1
+- [x] A run created by `agentvcr run` **learns its provider from its first call**. The
+      run exists before the agent has spoken, so the wire format is unknown at creation
+      — and `show` reads it to know how to render the run. Invisible while OpenAI was
+      the only recording format and also the default
+- [x] A stream cut mid-tool-call **keeps its partial arguments**. Anthropic applies a
+      tool call's JSON when the block closes, so a client that disconnects first used
+      to leave a call recorded with empty arguments — which reads as a call made with
+      none, a different bug from the one being debugged
 
 **Done when:** an Anthropic-SDK example records & replays; `show` displays tool
 name/args/result rows; `diff` of a run against its own replay reports no divergence,
 and against a tweaked re-record pinpoints the diverging step.
+**Done** — `examples/plain-loop/agent_anthropic.py` is the same agent as `agent.py` in
+the other wire format; `tests/test_anthropic_roundtrip.py` and `tests/test_differ.py`
+are the automated form of the check.
 
 ## Phase 4 — Fork & edit (week 3)
 

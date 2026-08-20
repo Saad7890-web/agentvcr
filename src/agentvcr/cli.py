@@ -16,7 +16,7 @@ import typer
 
 from . import __version__
 from .config import MISMATCH_POLICIES, MODES, PRESETS, ConfigError, Settings, load_settings
-from .core.models import STATUS_COMPLETED, STATUS_DIVERGED, Run, Step
+from .core.models import STATUS_COMPLETED, STATUS_DIVERGED, Run, Step, ToolCall
 from .core.store import Store
 from .providers import get_provider
 
@@ -215,7 +215,7 @@ def show(
     db: Path | None = DB_OPTION,
     config: Path | None = CONFIG_OPTION,
 ) -> None:
-    """Show a run's steps."""
+    """Show a run's timeline: its LLM steps, and the tool runs between them."""
     settings = _settings(db, config)
     with _store(settings) as store:
         target = store.get_run(run_id)
@@ -253,6 +253,10 @@ def show(
             return
 
         provider = get_provider(target.provider or "openai")
+        tools: dict[int, list[ToolCall]] = {}
+        for call in store.list_tool_calls(target.id):
+            tools.setdefault(call.after_step_idx, []).append(call)
+
         typer.echo("")
         typer.echo(_row(STEPS_WIDTHS, "STEP", "MODEL", "HTTP", "LATENCY", "TOKENS", "RESPONSE"))
         for step in steps:
@@ -267,6 +271,20 @@ def show(
                     _preview(provider, step),
                 )
             )
+            # The tool runs that happened between this LLM call and the next one
+            # (DESIGN.md §2) — the proxy never saw them execute, only their results.
+            for call in tools.get(step.idx, []):
+                typer.echo(
+                    _row(
+                        STEPS_WIDTHS,
+                        "",
+                        f"↳ {call.tool_name}",
+                        "tool",
+                        "-",
+                        "-",
+                        _compact(call.result)[:70] if call.result is not None else "(no result)",
+                    )
+                )
 
 
 @app.command()

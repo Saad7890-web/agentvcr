@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from agentvcr import __version__
 from agentvcr.cli import app
-from agentvcr.core.models import Step
+from agentvcr.core.models import Step, ToolCall
 from agentvcr.core.store import Store
 
 runner = CliRunner()
@@ -239,3 +239,42 @@ def test_show_json_is_machine_readable(tmp_path: Path) -> None:
 def test_show_reports_an_unknown_run(tmp_path: Path) -> None:
     result = runner.invoke(app, ["show", "NOPE", "--db", str(tmp_path / "a.db")])
     assert result.exit_code == 1
+
+
+def _tool_row_run(db: Path) -> str:
+    """A run whose timeline has a tool step between its two LLM steps."""
+    with Store.open(db) as store:
+        run = store.create_run(mode="record", name="flights", provider="openai")
+        store.add_step(
+            Step(run_id=run.id, idx=0, request={"body": {}}, response={}, status_code=200)
+        )
+        store.add_step(
+            Step(run_id=run.id, idx=1, request={"body": {}}, response={}, status_code=200)
+        )
+        store.add_tool_call(
+            ToolCall(
+                run_id=run.id,
+                after_step_idx=0,
+                tool_name="search_flights",
+                args={"origin": "SFO"},
+                result={"flights": [{"price": 289}]},
+                tool_call_id="call_1",
+            )
+        )
+        return run.id
+
+
+def test_show_interleaves_the_tool_timeline(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    run_id = _tool_row_run(db)
+
+    result = runner.invoke(app, ["show", run_id, "--db", str(db)])
+
+    assert result.exit_code == 0
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    tool_line = next(line for line in lines if "↳" in line)
+    # the tool step sits between the call that asked for it and the next LLM step
+    assert lines.index(tool_line) == lines.index(next(x for x in lines if x.startswith("0 "))) + 1
+    assert "search_flights" in tool_line
+    assert "289" in tool_line  # its result, not its arguments
+    assert "tool" in tool_line

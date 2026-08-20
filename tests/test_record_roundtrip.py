@@ -111,6 +111,7 @@ def test_a_tool_loop_records_and_show_renders_it(proxy) -> None:
     result = runner.invoke(app, ["show", "LOOPRUN", "--db", str(proxy.settings.db_path)])
     assert result.exit_code == 0
     assert "search_flights" in result.stdout
+    assert "↳ search_flights" in result.stdout  # the tool row of the timeline
     assert "The cheapest is B6918" in result.stdout
     assert "python agent.py" in result.stdout
     assert API_KEY not in result.stdout

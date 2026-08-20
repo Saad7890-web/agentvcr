@@ -100,6 +100,14 @@ def test_a_tool_loop_records_and_show_renders_it(proxy) -> None:
     assert tool_message["role"] == "tool"
     assert json.loads(tool_message["content"])["flights"][0]["flight"] == "B6918"
 
+    # …and it has been materialized into a tool step of its own, between the two
+    # LLM steps, with no help at all from the agent.
+    (tool_call,) = proxy.store.list_tool_calls("LOOPRUN")
+    assert tool_call.after_step_idx == 0
+    assert tool_call.tool_name == "search_flights"
+    assert tool_call.args == {"origin": "SFO", "destination": "JFK"}
+    assert tool_call.result == {"flights": [{"flight": "B6918", "price": 289}]}
+
     result = runner.invoke(app, ["show", "LOOPRUN", "--db", str(proxy.settings.db_path)])
     assert result.exit_code == 0
     assert "search_flights" in result.stdout

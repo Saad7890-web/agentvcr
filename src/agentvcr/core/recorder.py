@@ -13,6 +13,10 @@ Two responsibilities (DESIGN.md §4, §11):
 Failed upstream calls are recorded as steps like any other. An SDK that retries a 429
 therefore produces two steps, and replaying that tape positionally reproduces the same
 429-then-success sequence the client already knows how to handle.
+
+Each step that lands also gives :mod:`agentvcr.core.tools` the chance to materialize
+the tool run it reports the result of, so the timeline is built as the tape is written
+rather than reconstructed on read.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..providers import Provider, stable_hash
+from . import tools
 from .models import STATUS_COMPLETED, Run, Step
 from .store import Store, utcnow
 
@@ -86,7 +91,11 @@ def record_step(
         diverged=diverged,
         started_at=started_at or utcnow(),
     )
-    return store.add_step(step, at_next_idx=True)
+    store.add_step(step, at_next_idx=True)
+    # This request may carry the results of the previous step's tool calls; if it
+    # does, that tool run becomes a row of its own (DESIGN.md §2).
+    tools.materialize(store, provider=provider, step=step)
+    return step
 
 
 @dataclass

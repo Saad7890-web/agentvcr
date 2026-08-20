@@ -323,6 +323,19 @@ class Store:
         tool_call.id = self._insert("tool_calls", tool_call.to_row())
         return tool_call
 
+    def count_tool_calls(self, run_id: str, *, after_step_idx: int | None = None) -> int:
+        """How many tool runs are materialized for a run, or for one step of it."""
+        if after_step_idx is None:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM tool_calls WHERE run_id = ?", (run_id,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT COUNT(*) FROM tool_calls WHERE run_id = ? AND after_step_idx = ?",
+                (run_id, after_step_idx),
+            ).fetchone()
+        return int(row[0])
+
     def list_tool_calls(self, run_id: str) -> list[ToolCall]:
         rows = self.conn.execute(
             "SELECT * FROM tool_calls WHERE run_id = ? ORDER BY after_step_idx, id", (run_id,)

@@ -47,10 +47,10 @@ def test_serve_rejects_unknown_preset() -> None:
     assert result.exit_code != 0
 
 
-def test_help_lists_the_phase_1_commands() -> None:
+def test_help_lists_the_shipped_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("serve", "run", "runs", "show"):
+    for command in ("serve", "run", "runs", "show", "diff"):
         assert command in rendered(result)
 
 
@@ -278,3 +278,71 @@ def test_show_interleaves_the_tool_timeline(tmp_path: Path) -> None:
     assert "search_flights" in tool_line
     assert "289" in tool_line  # its result, not its arguments
     assert "tool" in tool_line
+
+
+def _two_runs(db: Path, *, second_answer: str) -> tuple[str, str]:
+    """Two one-step runs that differ only in what the model said."""
+    ids = []
+    with Store.open(db) as store:
+        for answer in ("The cheapest is B6918 at $289.", second_answer):
+            run = store.create_run(mode="record", provider="openai")
+            store.add_step(
+                Step(
+                    run_id=run.id,
+                    idx=0,
+                    request={
+                        "body": {"model": "m", "messages": [{"role": "user", "content": "?"}]}
+                    },
+                    response={"choices": [{"message": {"role": "assistant", "content": answer}}]},
+                    fingerprint="same",
+                    status_code=200,
+                )
+            )
+            ids.append(run.id)
+    return ids[0], ids[1]
+
+
+def test_diff_of_identical_runs_says_so_and_exits_zero(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    a, b = _two_runs(db, second_answer="The cheapest is B6918 at $289.")
+
+    result = runner.invoke(app, ["diff", a, b, "--db", str(db)])
+
+    assert result.exit_code == 0
+    assert "identical" in result.stdout
+
+
+def test_diff_names_the_diverging_step_and_exits_one(tmp_path: Path) -> None:
+    """Exit 1 on a difference is the diff(1) convention — it is what lets a replay in
+    CI gate on the runs still matching."""
+    db = tmp_path / "a.db"
+    a, b = _two_runs(db, second_answer="No flights found.")
+
+    result = runner.invoke(app, ["diff", a, b, "--db", str(db)])
+
+    assert result.exit_code == 1
+    assert "runs diverge at step 0 (response text differs)" in result.stdout
+    assert "- The cheapest is B6918 at $289." in result.stdout
+    assert "+ No flights found." in result.stdout
+
+
+def test_diff_json_is_machine_readable(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    a, b = _two_runs(db, second_answer="No flights found.")
+
+    result = runner.invoke(app, ["diff", a, b, "--json", "--db", str(db)])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["identical"] is False
+    assert payload["steps"][0]["changes"][0]["where"] == "response"
+
+
+def test_diff_reports_an_unknown_run(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    a, _ = _two_runs(db, second_answer="whatever")
+
+    result = runner.invoke(app, ["diff", a, "NOPE", "--db", str(db)])
+
+    assert result.exit_code == 2
+    assert "nosuchrun:NOPE" in rendered(result)  # rendered() drops the whitespace

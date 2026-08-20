@@ -1,6 +1,6 @@
 """``agentvcr`` command line.
 
-Phases 1–2 ship ``serve``, ``run``, ``runs`` and ``show``; ``fork``, ``diff`` and
+Phases 1–3 ship ``serve``, ``run``, ``runs``, ``show`` and ``diff``; ``fork`` and
 ``ui`` arrive with the phases that give them something to do.
 """
 
@@ -16,6 +16,7 @@ import typer
 
 from . import __version__
 from .config import MISMATCH_POLICIES, MODES, PRESETS, ConfigError, Settings, load_settings
+from .core import differ
 from .core.models import STATUS_COMPLETED, STATUS_DIVERGED, Run, Step, ToolCall
 from .core.store import Store
 from .providers import get_provider
@@ -288,6 +289,65 @@ def show(
 
 
 @app.command()
+def diff(
+    left_id: str = typer.Argument(..., metavar="RUN_A", help="The run to compare from."),
+    right_id: str = typer.Argument(..., metavar="RUN_B", help="The run to compare to."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the diff as JSON instead."),
+    db: Path | None = DB_OPTION,
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Diff two runs step by step.
+
+    Steps are aligned by fingerprint (DESIGN.md §7), then compared on what the agent actually did:
+    request messages, response text, tool calls and tool results. Ids, timestamps and
+    token counts differ between any two live calls and are not reported.
+
+    Exits 1 when the runs differ, like ``diff(1)`` — so a replay in CI can gate on it.
+    """
+    settings = _settings(db, config)
+    with _store(settings) as store:
+        left = store.get_run(left_id)
+        right = store.get_run(right_id)
+        for run_id, found in ((left_id, left), (right_id, right)):
+            if found is None:
+                typer.secho(f"no such run: {run_id}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(2)
+        assert left is not None and right is not None  # both checked above
+        try:
+            result = differ.diff_runs(store, left, right)
+        except differ.IncomparableRuns as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(2) from exc
+        counts = (store.count_steps(left.id), store.count_steps(right.id))
+
+    if as_json:
+        typer.echo(json.dumps(result.as_dict(), indent=2, default=str))
+        raise typer.Exit(0 if result.identical else 1)
+
+    typer.echo(f"diff {left.id} → {right.id}")
+    typer.echo(f"  a  {_diff_side(left, counts[0])}")
+    typer.echo(f"  b  {_diff_side(right, counts[1])}")
+    typer.echo("")
+    for pair in result.pairs:
+        if pair.same:
+            continue
+        if not pair.matched:
+            side = "a" if pair.left else "b"
+            typer.echo(f"  step {pair.label}  present only in {side}")
+            continue
+        for change in pair.changes:
+            typer.echo(f"  step {pair.label}  {change.detail}")
+            if change.left is not None:
+                typer.secho(f"    - {change.left}", fg=typer.colors.RED)
+            if change.right is not None:
+                typer.secho(f"    + {change.right}", fg=typer.colors.GREEN)
+    if not result.identical:
+        typer.echo("")
+    typer.secho(result.summary, fg=typer.colors.GREEN if result.identical else typer.colors.YELLOW)
+    raise typer.Exit(0 if result.identical else 1)
+
+
+@app.command()
 def version() -> None:
     """Print the agentvcr version."""
     typer.echo(__version__)
@@ -304,6 +364,11 @@ def _row(widths: tuple[int, ...], *cells: str) -> str:
     out = [cell.ljust(width) for cell, width in zip(cells, widths, strict=False)]
     out.extend(cells[len(widths) :])
     return "  ".join(out).rstrip()
+
+
+def _diff_side(item: Run, steps: int) -> str:
+    """One line describing a run being diffed: what it is, not what is in it."""
+    return f"{item.id:<18}  {item.mode:<10} {item.status:<10} {steps} step(s)  {_run_label(item)}"
 
 
 def _run_label(item: Run) -> str:

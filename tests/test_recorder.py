@@ -3,7 +3,7 @@ from __future__ import annotations
 from agentvcr.core.models import STATUS_COMPLETED, Step
 from agentvcr.core.recorder import REDACTION_PLACEHOLDER, RunRouter, redact_headers
 from agentvcr.core.store import Store
-from agentvcr.providers import OPENAI
+from agentvcr.providers import ANTHROPIC, OPENAI
 
 
 def body(*contents: str) -> dict:
@@ -107,3 +107,38 @@ def test_close_all_completes_tracked_runs(store: Store) -> None:
     run = router.resolve(provider=OPENAI, body=body("a"), mode="record")
     router.close_all()
     assert store.get_run(run.id).status == STATUS_COMPLETED
+
+
+def test_a_run_created_before_the_agent_spoke_learns_its_provider(store: Store) -> None:
+    """`agentvcr run` creates the run up front, so the wire format is unknown until the
+    first call arrives — and `show` needs it stored to render the run at all."""
+    router = RunRouter(store)
+    created = store.create_run(mode="record", run_id="PRE", command=["python", "agent.py"])
+    assert created.provider is None
+
+    resolved = router.resolve(
+        provider=ANTHROPIC,
+        body={"model": "claude", "messages": []},
+        mode="record",
+        run_id="PRE",
+        upstream_url="https://api.anthropic.com",
+    )
+
+    assert resolved.provider == "anthropic"
+    assert store.get_run("PRE").provider == "anthropic"
+    assert store.get_run("PRE").upstream_url == "https://api.anthropic.com"
+
+
+def test_a_runs_provider_is_not_overwritten_by_a_later_call(store: Store) -> None:
+    router = RunRouter(store)
+    store.create_run(mode="record", run_id="PRE", provider="openai", upstream_url="https://a.test")
+
+    router.resolve(
+        provider=ANTHROPIC,
+        body={"model": "claude", "messages": []},
+        mode="record",
+        run_id="PRE",
+        upstream_url="https://api.anthropic.com",
+    )
+
+    assert store.get_run("PRE").provider == "openai"

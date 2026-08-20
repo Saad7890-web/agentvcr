@@ -142,6 +142,13 @@ class RunRouter:
             run = self.store.get_run(run_id) or self.store.create_run(
                 mode=mode, run_id=run_id, provider=provider.name, upstream_url=upstream_url
             )
+            if run.provider is None:
+                # `agentvcr run` creates the run before the agent has spoken, so it
+                # cannot know the wire format. The first call settles it — and it has
+                # to be stored, because `show` and `diff` read a run's provider to know
+                # how to render what is on it.
+                self.store.update_run(run.id, provider=provider.name, upstream_url=upstream_url)
+                run.provider, run.upstream_url = provider.name, upstream_url
             self._track(run.id, keys)
             return run
 

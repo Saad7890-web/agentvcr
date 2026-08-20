@@ -188,12 +188,16 @@ def test_unrecorded_paths_are_proxied_verbatim(proxy) -> None:
 
 
 @respx.mock
-def test_anthropic_prefix_is_passthrough_until_phase_3(proxy) -> None:
-    route = respx.post("https://anthropic.test/v1/messages").mock(
-        return_value=httpx.Response(200, json={"content": []})
+def test_an_unrecorded_path_under_a_recording_mount_is_proxied(proxy) -> None:
+    """Only a provider's ``recorded_paths`` become steps; the rest of its mount is a
+    plain proxy, which is what makes token counting and model listing keep working."""
+    route = respx.post("https://anthropic.test/v1/messages/count_tokens").mock(
+        return_value=httpx.Response(200, json={"input_tokens": 12})
     )
 
-    response = proxy.client.post("/anthropic/v1/messages", json={"model": "claude", "messages": []})
+    response = proxy.client.post(
+        "/anthropic/v1/messages/count_tokens", json={"model": "claude", "messages": []}
+    )
 
     assert response.status_code == 200
     assert route.called

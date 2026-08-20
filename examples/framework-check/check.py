@@ -69,6 +69,7 @@ def main() -> int:
         help="whether the replay is expected to match the tape (default) or drift from it",
     )
     args = parser.parse_args()
+    label = Path(args.agent).stem  # which framework this run is probing
 
     workdir = Path(args.workdir)
     shutil.rmtree(workdir, ignore_errors=True)
@@ -116,7 +117,7 @@ def main() -> int:
                 "agentvcr.cli",
                 "run",
                 "--name",
-                "langgraph",
+                label,
                 "--",
                 sys.executable,
                 args.agent,

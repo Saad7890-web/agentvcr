@@ -6,9 +6,11 @@ real framework is where it goes to die. This harness tries to break it — on pu
 early, with no API key: `fake_upstream.py` plays the model.
 
 ```bash
-pip install langgraph langchain-openai        # not agentvcr dependencies
+pip install langgraph langchain-openai openai-agents   # not agentvcr dependencies
 
 python examples/framework-check/check.py                      # sequential ReAct agent
+python examples/framework-check/check.py \
+    --agent examples/framework-check/agents_sdk_agent.py      # OpenAI Agents SDK
 python examples/framework-check/check.py \
     --agent examples/framework-check/parallel_agent.py \
     --expect divergence                                       # parallel fan-out
@@ -18,13 +20,23 @@ Each run records the agent through the proxy, **kills the upstream process**, re
 the tape, and compares. Killing the upstream is the part that matters: it makes "replay
 never touches the network" a fact about the run rather than a claim about the code.
 
-## What it found (2026-08-19, langgraph 1.2.11, langchain-openai 1.5.2)
+## What it found (2026-08-20, langgraph 1.2.11, langchain-openai 1.5.2, openai-agents 0.22.0)
 
-**Sequential agents replay perfectly.** A `create_react_agent` tool loop records two
-steps, and replays them with the model process dead: same answer, same responses step
-for step, and *zero* fingerprint divergence — LangChain rebuilds byte-stable request
-bodies across runs, so even the advisory check is clean. No proxy-specific code in the
-agent; only `base_url`.
+**Sequential agents replay perfectly, in both frameworks.** A LangGraph
+`create_react_agent` tool loop records two steps, and replays them with the model
+process dead: same answer, same responses step for step, and *zero* fingerprint
+divergence — LangChain rebuilds byte-stable request bodies across runs, so even the
+advisory check is clean. The OpenAI Agents SDK does the same, with the same result. No
+proxy-specific code in either agent; only `base_url`.
+
+Two Agents SDK defaults have to be turned off, and neither is about replay:
+
+- it calls **`/v1/responses`** unless told `set_default_openai_api("chat_completions")`.
+  agentvcr does not speak the Responses API yet (DESIGN.md §12; post-MVP item 3), so
+  this is the one framework default that currently needs changing;
+- its **tracing uploads to api.openai.com**, which needs a real key and would make "the
+  replay reached the network zero times" false for a reason that has nothing to do with
+  the tape.
 
 **Parallel fan-out is a coin toss — and every bad flip is caught.** A graph with two
 branches leaving `START` issues both LLM calls in one superstep, so their arrival order
@@ -60,3 +72,6 @@ re-checked when a framework releases a new major version.
 deprecated in favor of `langchain.agents.create_agent` — the replacement lives in the
 `langchain` package, which this check deliberately does not install. The deprecation
 warning in the output is expected.
+
+The run each probe records is named after its agent file, so `agentvcr runs` in the
+scratch database says which framework produced which tape.

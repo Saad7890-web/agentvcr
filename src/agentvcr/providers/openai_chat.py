@@ -15,7 +15,7 @@ import json
 from collections.abc import Iterator
 from typing import Any
 
-from .base import stable_hash
+from .base import iter_sse_events, stable_hash
 
 NAME = "openai"
 MOUNT_PATH = "/openai/v1"
@@ -27,10 +27,10 @@ VOLATILE_REQUEST_FIELDS = frozenset({"stream", "stream_options", "user", "metada
 
 
 def iter_sse_data(raw: bytes) -> Iterator[str]:
-    """Yield the payload of every ``data:`` line in an SSE byte stream."""
-    for line in raw.replace(b"\r\n", b"\n").split(b"\n"):
-        if line.startswith(b"data:"):
-            yield line[len(b"data:") :].strip().decode("utf-8", "replace")
+    """Yield the payload of every SSE message. OpenAI never sets an ``event:`` line —
+    the chunk's type lives in the JSON — so only the data half is of interest here."""
+    for _, data in iter_sse_events(raw):
+        yield data.strip()
 
 
 class OpenAIChatProvider:

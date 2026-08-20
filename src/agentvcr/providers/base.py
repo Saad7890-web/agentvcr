@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from typing import Any, Protocol
 
 
@@ -63,3 +64,33 @@ def stable_hash(payload: Any) -> str:
     """Shared fingerprint helper: sha256 over a canonical JSON encoding."""
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def iter_sse_events(raw: bytes) -> Iterator[tuple[str | None, str]]:
+    """Yield ``(event, data)`` for every message in a raw SSE byte stream.
+
+    Both wire formats stream over SSE, but they carry the event type differently:
+    OpenAI puts it inside the JSON payload, Anthropic dispatches on the ``event:``
+    line and its SDK reads that line. One parser serves both — and it takes the whole
+    concatenated stream, so a chunk boundary landing mid-line costs nothing.
+    """
+    event: str | None = None
+    data: list[str] = []
+    for line in raw.replace(b"\r\n", b"\n").split(b"\n"):
+        if not line.strip():
+            if data:
+                yield event, "\n".join(data)
+            event, data = None, []
+            continue
+        if line.startswith(b":"):  # a comment, i.e. a keep-alive
+            continue
+        field, _, value = line.partition(b":")
+        if value[:1] == b" ":  # a single leading space after the colon is separator, not data
+            value = value[1:]
+        decoded = value.decode("utf-8", "replace")
+        if field == b"event":
+            event = decoded.strip()
+        elif field == b"data":
+            data.append(decoded)
+    if data:  # a stream that ended without its final blank line
+        yield event, "\n".join(data)

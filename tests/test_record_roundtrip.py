@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 import httpx
+import pytest
 import respx
 from typer.testing import CliRunner
 
@@ -117,6 +118,8 @@ def test_a_tool_loop_records_and_show_renders_it(proxy) -> None:
     assert API_KEY not in result.stdout
 
 
-def test_the_example_agent_stays_valid_python() -> None:
-    source = Path(__file__).resolve().parents[1] / "examples" / "plain-loop" / "agent.py"
+@pytest.mark.parametrize("name", ["agent.py", "agent_anthropic.py"])
+def test_the_example_agents_stay_valid_python(name: str) -> None:
+    """Neither example imports agentvcr, so nothing else would notice if one broke."""
+    source = Path(__file__).resolve().parents[1] / "examples" / "plain-loop" / name
     ast.parse(source.read_text())

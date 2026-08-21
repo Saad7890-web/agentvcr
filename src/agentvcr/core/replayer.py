@@ -70,16 +70,27 @@ class FingerprintMismatch(ReplayError):
 
 @dataclass(frozen=True)
 class Served:
-    """The tape step answering a request, and whether it drifted from the request."""
+    """The step answering a request, and whether it drifted from the request.
+
+    ``edited`` marks the one step of a fork that came from an edit rather than from
+    the tape (DESIGN.md §6) — the client is told so in a response header.
+    """
 
     step: Step
     diverged: bool
+    edited: bool = False
 
 
 def tape_id(replay_run: Run) -> str:
-    """The run whose steps ``replay_run`` replays."""
+    """The run whose steps ``replay_run`` serves from.
+
+    Two lineages lead to a tape and both end here: a replay points at one through
+    ``replay_of``, a fork through ``parent_run_id`` (DESIGN.md §4). Everything below
+    this line is the same machinery either way — a fork *is* a replay, up to the step
+    where its edit takes over.
+    """
     assert_replayable(replay_run)
-    return str(replay_run.replay_of)
+    return str(replay_run.replay_of or replay_run.parent_run_id)
 
 
 def assert_replayable(run: Run) -> None:
@@ -88,12 +99,19 @@ def assert_replayable(run: Run) -> None:
     A run pointed at in replay mode is either a *recording* to replay (steps of its
     own, no ``replay_of``) or a replay run created ahead of time by ``agentvcr run``.
     A replay run with no tape behind it is neither: its steps are replays, not a
-    recording, so replaying them would be replaying nothing.
+    recording, so replaying them would be replaying nothing. The same holds for a fork
+    with no parent — there is nothing to branch away from.
     """
     if run.mode == "replay" and not run.replay_of:
         raise TapeMissing(
             f"run {run.id} is in replay mode but has no tape behind it; "
             f"replay a recording with `agentvcr run --mode replay --run <id>`",
+            run=run.id,
+        )
+    if run.mode == "fork" and not run.parent_run_id:
+        raise TapeMissing(
+            f"run {run.id} is in fork mode but has no tape behind it; "
+            f"branch off a recording with `agentvcr fork <run> --at <step>`",
             run=run.id,
         )
 

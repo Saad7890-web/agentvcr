@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import httpx
-import pytest
 import respx
 
 from agentvcr.core.recorder import REDACTION_PLACEHOLDER
@@ -220,17 +219,18 @@ def test_passthrough_mode_records_nothing(proxy) -> None:
     assert proxy.store.list_runs() == []
 
 
-@pytest.mark.parametrize("mode,phase", [("fork", "4")])
-def test_unimplemented_modes_answer_with_a_structured_error(proxy, mode, phase) -> None:
+def test_fork_mode_needs_a_fork_to_serve(proxy) -> None:
+    """A fork's edits say where its branch leaves the tape, so it cannot be improvised
+    from a mode header the way a replay session can."""
     response = proxy.client.post(
         "/openai/v1/chat/completions",
         json={"model": "m", "messages": []},
-        headers={"X-AgentVCR-Mode": mode},
+        headers={"X-AgentVCR-Mode": "fork"},
     )
-    assert response.status_code == 501
+    assert response.status_code == 409
     body = response.json()["error"]
-    assert body["type"] == "mode_not_implemented"
-    assert f"Phase {phase}" in body["message"]
+    assert body["type"] == "no_tape"
+    assert "agentvcr fork" in body["message"]
 
 
 @respx.mock

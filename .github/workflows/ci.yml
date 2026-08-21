@@ -36,6 +36,19 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: pytest
 
+  # The only check that goes through the real CLI, a real socket and a real SDK.
+  # It is also the script the launch GIF is recorded from, so it must not rot.
+  demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]' openai
+      - run: python examples/fork-demo/demo.py
+
   build:
     runs-on: ubuntu-latest
     steps:

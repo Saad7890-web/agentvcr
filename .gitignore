@@ -27,5 +27,6 @@ src/agentvcr/server/static/
 .idea/
 .vscode/
 
-# scratch output from examples/framework-check/
+# scratch output from the examples
 examples/framework-check/.check/
+examples/fork-demo/.demo/

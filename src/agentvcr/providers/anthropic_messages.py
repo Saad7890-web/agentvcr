@@ -117,6 +117,21 @@ class AnthropicMessagesProvider:
                     )
         return results
 
+    def patch_tool_result(self, body: dict[str, Any], *, tool_call_id: str, result: Any) -> bool:
+        """Rewrite a tool result on its way upstream (DESIGN.md §6).
+
+        The replacement goes in as a plain string, which the format accepts wherever a
+        block list does — and which :func:`_result_content` reads back unchanged.
+        """
+        for message in self.messages_of(body):
+            if not isinstance(message, dict):
+                continue
+            for block in _blocks(message.get("content")):
+                if block.get("type") == "tool_result" and block.get("tool_use_id") == tool_call_id:
+                    block["content"] = _as_content(result)
+                    return True
+        return False
+
     # -------------------------------------------------------------------- streams
 
     def accumulate_stream(self, chunks: list[bytes]) -> dict[str, Any]:
@@ -209,6 +224,11 @@ def _result_content(content: Any) -> Any:
             return _maybe_json("".join(texts))
         return content
     return _maybe_json(content)
+
+
+def _as_content(value: Any) -> str:
+    """The inverse of :func:`_maybe_json`: a tool result as the string the wire wants."""
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
 def _maybe_json(value: Any) -> Any:

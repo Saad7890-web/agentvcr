@@ -12,8 +12,9 @@ the run travels in the base URL, so an unmodified client carries it for free. Fa
 both, the grouping heuristic in :mod:`agentvcr.core.recorder` chains the call onto a
 run by message prefix.
 
-Phases 1–2 implement ``record``, ``replay`` and ``passthrough``; ``fork`` answers with
-a structured 501 until Phase 4 lands.
+All four modes are served from here: ``record`` forwards and captures, ``replay``
+answers from a tape without a network, ``fork`` does both — tape first, then live on a
+child run — and ``passthrough`` is a plain proxy that persists nothing.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..config import MODES, Settings
-from ..core import replayer
+from ..core import forker, replayer
 from ..core.models import STATUS_DIVERGED, Run
 from ..core.recorder import RunRouter, record_step
 from ..core.store import Store, utcnow
@@ -39,10 +40,10 @@ MODE_HEADER = "x-agentvcr-mode"
 
 MODE_RECORD = "record"
 MODE_REPLAY = "replay"
+MODE_FORK = "fork"
 MODE_PASSTHROUGH = "passthrough"
 #: Modes the tape can be captured or served for; the rest is a plain proxy.
-_TAPE_MODES = (MODE_RECORD, MODE_REPLAY)
-_UNIMPLEMENTED_MODES = {"fork": 4}
+_TAPE_MODES = (MODE_RECORD, MODE_REPLAY, MODE_FORK)
 
 _PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"]
 
@@ -104,15 +105,6 @@ async def _dispatch(
         # Silently proxying an unknown mode would look like recording and record
         # nothing, so a typo in X-AgentVCR-Mode is an error, not a default.
         return _error(400, "unknown_mode", f"unknown mode {mode!r}; expected one of {list(MODES)}")
-    unimplemented_phase = _UNIMPLEMENTED_MODES.get(mode)
-    if unimplemented_phase is not None:
-        return _error(
-            501,
-            "mode_not_implemented",
-            f"mode {mode!r} lands in Phase {unimplemented_phase} (PLAN.md); "
-            f"this build implements 'record', 'replay' and 'passthrough'",
-        )
-
     body = await request.body()
     upstream = settings.upstream_for(provider.name).rstrip("/") + "/" + subpath.lstrip("/")
     is_recorded_path = request.method == "POST" and f"/{subpath.lstrip('/')}" in tuple(
@@ -132,6 +124,8 @@ async def _dispatch(
                 f"{request.method} {request.url.path} is not recorded, and replay mode "
                 f"has no upstream to forward it to",
             )
+        # A fork does have an upstream — it is a live run that starts from a tape — so
+        # a path the tape never covered (`GET /models`) is forwarded, as when recording.
         return await _forward(request, client, upstream, body, recorded=False)
 
     router: RunRouter = request.app.state.run_router
@@ -146,11 +140,11 @@ async def _dispatch(
         return await _replay(
             request, client, upstream, body, provider=provider, run=run, parsed=parsed
         )
-    if provider.is_streaming(parsed):
-        return await _forward_streaming_recorded(
-            request, client, upstream, body, provider=provider, run_id=run.id, parsed=parsed
+    if mode == MODE_FORK:
+        return await _fork(
+            request, client, upstream, body, provider=provider, run=run, parsed=parsed
         )
-    return await _forward_recorded(
+    return await _go_live(
         request, client, upstream, body, provider=provider, run_id=run.id, parsed=parsed
     )
 
@@ -315,6 +309,27 @@ async def _forward_streaming_recorded(
     )
 
 
+async def _go_live(
+    request: Request,
+    client: httpx.AsyncClient,
+    url: str,
+    body: bytes,
+    *,
+    provider: Provider,
+    run_id: str,
+    parsed: dict[str, Any],
+) -> Response:
+    """Make the call for real and record it — what recording does, and what a replay
+    or a fork falls through to once it leaves the tape."""
+    if provider.is_streaming(parsed):
+        return await _forward_streaming_recorded(
+            request, client, url, body, provider=provider, run_id=run_id, parsed=parsed
+        )
+    return await _forward_recorded(
+        request, client, url, body, provider=provider, run_id=run_id, parsed=parsed
+    )
+
+
 # ----------------------------------------------------------------------------- replay
 
 
@@ -354,14 +369,85 @@ async def _replay(
 
     if served is None:
         # `live-on-miss` policy: the tape stops here, the branch continues for real.
-        if provider.is_streaming(parsed):
-            return await _forward_streaming_recorded(
-                request, client, url, body, provider=provider, run_id=session.id, parsed=parsed
-            )
-        return await _forward_recorded(
+        return await _go_live(
             request, client, url, body, provider=provider, run_id=session.id, parsed=parsed
         )
+    return _serve_from_tape(
+        request, provider=provider, session=session, parsed=parsed, served=served
+    )
 
+
+# ------------------------------------------------------------------------------- fork
+
+
+async def _fork(
+    request: Request,
+    client: httpx.AsyncClient,
+    url: str,
+    body: bytes,
+    *,
+    provider: Provider,
+    run: Run,
+    parsed: dict[str, Any],
+) -> Response:
+    """Replay the prefix, serve the edit, then go live on the fork (DESIGN.md §6).
+
+    Unlike a replay, a fork is *not* given a session run of its own: it already is one.
+    ``agentvcr fork`` creates the child run before the agent starts, because the edits
+    that define where the branch leaves the tape have to be stored somewhere first.
+    """
+    store: Store = request.app.state.store
+    settings: Settings = request.app.state.settings
+
+    try:
+        fork_plan = forker.plan(store, run)
+        served = forker.next_step(
+            store,
+            fork_run=run,
+            fork_plan=fork_plan,
+            provider=provider,
+            body=parsed,
+            policy=settings.mismatch_policy,
+        )
+    except replayer.ReplayError as exc:
+        return _replay_error(exc)
+
+    if served is not None:
+        return _serve_from_tape(
+            request, provider=provider, session=run, parsed=parsed, served=served
+        )
+
+    # Live from here on, with the edit applied to every outbound request — each one
+    # carries the whole conversation, so patching only the first would let the real
+    # tool result back in on the next turn.
+    patched, applied = forker.patch_outbound(fork_plan, provider, parsed)
+    if patched is not parsed:
+        body = json.dumps(patched, ensure_ascii=False).encode()
+    response = await _go_live(
+        request, client, url, body, provider=provider, run_id=run.id, parsed=patched
+    )
+    if applied:
+        response.headers["X-AgentVCR-Patched"] = ", ".join(applied)
+    return response
+
+
+# ----------------------------------------------------------------------- serving a step
+
+
+def _serve_from_tape(
+    request: Request,
+    *,
+    provider: Provider,
+    session: Run,
+    parsed: dict[str, Any],
+    served: replayer.Served,
+) -> Response:
+    """Answer from ``served`` and record the answer as a step of ``session``.
+
+    The step recorded holds the request the agent actually sent and the response it was
+    given, so a replay or a fork can be diffed against the run it came from.
+    """
+    store: Store = request.app.state.store
     started_at, started = utcnow(), time.perf_counter()
     streaming = provider.is_streaming(parsed)
     content, media_type = replayer.response_body(served.step, provider, streaming=streaming)
@@ -390,6 +476,7 @@ async def _replay(
         "X-AgentVCR-Tape": served.step.run_id,
         "X-AgentVCR-Step": str(step.idx),
         "X-AgentVCR-Diverged": "true" if served.diverged else "false",
+        "X-AgentVCR-Edited": "true" if served.edited else "false",
     }
     return Response(content=content, status_code=status_code, headers=headers)
 

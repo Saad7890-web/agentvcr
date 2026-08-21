@@ -100,6 +100,16 @@ class OpenAIChatProvider:
                 )
         return results
 
+    def patch_tool_result(self, body: dict[str, Any], *, tool_call_id: str, result: Any) -> bool:
+        """Rewrite a tool result on its way upstream (DESIGN.md §6)."""
+        for message in self.messages_of(body):
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            if message.get("tool_call_id") == tool_call_id:
+                message["content"] = _as_content(result)
+                return True
+        return False
+
     # -------------------------------------------------------------------- streams
 
     def accumulate_stream(self, chunks: list[bytes]) -> dict[str, Any]:
@@ -179,6 +189,11 @@ class OpenAIChatProvider:
 def _sse(payload: dict[str, Any]) -> bytes:
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     return f"data: {body}\n\n".encode()
+
+
+def _as_content(value: Any) -> str:
+    """The inverse of :func:`_maybe_json`: a tool result as the string the wire wants."""
+    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
 
 
 def _maybe_json(value: Any) -> Any:

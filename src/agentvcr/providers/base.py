@@ -47,6 +47,15 @@ class Provider(Protocol):
     def extract_tool_results(self, body: dict[str, Any]) -> list[dict[str, Any]]:
         """Tool results carried by a request's message list (DESIGN.md §2)."""
 
+    def patch_tool_result(self, body: dict[str, Any], *, tool_call_id: str, result: Any) -> bool:
+        """Rewrite the result of ``tool_call_id`` in an *outbound* request, in place.
+
+        The inverse of :meth:`extract_tool_results`, and how a forked tool result
+        reaches the model (DESIGN.md §6): the result lives inside the request that
+        follows the call, so a fork edits it on the way upstream. Returns whether a
+        matching result was found — a request from before the call carries none.
+        """
+
     def model_of(self, body: dict[str, Any]) -> str | None:
         """Model name for display and step metadata."""
 

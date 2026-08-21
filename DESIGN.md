@@ -159,19 +159,34 @@ warm — same zero-config ergonomics as the grouping heuristic, and just as advi
 
 ## 6. Fork & edit semantics
 
-**An edit defines the fork point.** For a fork of run R at step *k* with optional edits:
+**An edit defines the fork point.** For a fork of run R at step *k* (numbered as
+`agentvcr show` prints it, from 0), *where* the branch leaves the tape follows from
+*what* was edited — it is not a separate setting:
 
-- Steps `1 … k-1`: served from the tape (agent deterministically retraces its path).
-- **Edited assistant response at step k:** the proxy serves the *edited* response at
-  step k, then goes live for `k+1 …`. The agent genuinely reacts to the edit.
-- **Edited tool result of step k:** the tool result physically lives inside request
-  `k+1`, and during the replayed prefix the proxy ignores request bodies — so the edit
-  is applied as an **outbound request patch**: steps `1 … k` replay from tape, and from
-  the first live call onward the proxy rewrites the matching tool-result message in the
-  outgoing request body before forwarding upstream. Same mechanism handles system/user
-  prompt edits.
+- **Edited assistant response at step k** (`--edit-response FILE`): steps `0 … k-1` are
+  served from the tape, step *k* is answered with the edited response, and `k+1 …` are
+  live. The agent genuinely reacts to the edit.
+- **Edited tool result of step k** (`--edit-tool-result NAME=FILE`): the tool result
+  physically lives inside request `k+1`, and during the replayed prefix the proxy
+  ignores request bodies — so the edit is applied as an **outbound request patch**.
+  Steps `0 … k` replay from the tape, and from the first live call onward the proxy
+  rewrites the matching tool-result message in the outgoing request body before
+  forwarding upstream.
+- **Edited prompt** (`--edit-message I=FILE`): the same outbound patch, pointed at a
+  message instead of a result. It rewrites request *k* itself, so steps `0 … k-1`
+  replay and the branch goes live *at* *k*, carrying the new message.
 - The fork is stored as a child run (`parent_run_id`, `fork_step`, edits) — so the diff
   view can show exactly what changed and lineage forms a tree.
+
+Two consequences of "every request carries the whole conversation" shape the rest:
+
+- **The patch is re-applied to every live call**, not just the first. Patching only the
+  first would hand the model the real tool result again on the very next turn.
+- **Edits of different kinds at one step are refused, at creation.** Each kind puts the
+  branch in a different place, so mixing them is a contradiction rather than a merge: an
+  edited response at *k* replaces the very tool calls a tool-result edit names, leaving
+  that edit silently inert. Several tool results at one step are the exception — a step
+  can call more than one tool.
 
 This yields the 30-second demo: *agent fails at step 9 → open step 6 → edit the tool
 result → re-run → agent passes.* Re-running executes the user's own agent process with
@@ -286,7 +301,7 @@ agentvcr/
 │   │   └── differ.py             # run alignment + step diffs
 │   └── providers/
 │       ├── base.py               # Provider interface: normalize, fingerprint,
-│       │                         #   extract_tool_calls, synthesize_stream
+│       │                         #   extract/patch_tool_result, synthesize_stream
 │       ├── openai_chat.py        # /v1/chat/completions (covers Groq, Gemini-compat,
 │       │                         #   OpenRouter, Ollama, vLLM)
 │       └── anthropic_messages.py # /v1/messages
@@ -298,8 +313,10 @@ agentvcr/
 
 **Provider abstraction is the load-bearing interface.** Recording/replay/fork logic is
 format-agnostic; each provider module only knows how to normalize a body, fingerprint
-it, pull tool calls/results out of messages, and synthesize SSE chunks. Adding
-`/v1/responses` or a new provider later touches only `providers/`.
+it, pull tool calls/results out of messages, put an edited result *back* into one, and
+synthesize SSE chunks. Adding `/v1/responses` or a new provider later touches only
+`providers/`. Reading a tool result and rewriting one are the same knowledge in both
+directions, so they live together and are contract-tested against each other.
 
 **Upstream routing:** path prefix picks the wire format; the actual upstream host is
 config (`agentvcr.toml` or flags), with presets so free-tier demos are one flag:

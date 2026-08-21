@@ -146,16 +146,16 @@ are the automated form of the check.
 
 The killer feature, per DESIGN.md §6.
 
-- [ ] `core/forker.py`: create child run (set `parent_run_id` / `fork_step`, **no copied
+- [x] `core/forker.py`: create child run (set `parent_run_id` / `fork_step`, **no copied
       steps** — see below), store edits
-- [ ] Generalize tape resolution in `core/replayer.py`: a fork finds its tape through
+- [x] Generalize tape resolution in `core/replayer.py`: a fork finds its tape through
       `parent_run_id` the way a replay finds one through `replay_of`
-- [ ] Fork mode in the proxy: replay prefix → serve edited response at the edit step →
+- [x] Fork mode in the proxy: replay prefix → serve edited response at the edit step →
       go live and record the new branch; outbound request patching for tool-result and
       prompt edits
-- [ ] `agentvcr fork <run> --at N [--edit-response file.json | --edit-tool-result name=file.json]`
+- [x] `agentvcr fork <run> --at N [--edit-response file.json | --edit-tool-result name=file.json]`
       → prints the fork id and the exact re-run command
-- [ ] Tests: fork with edited assistant response changes the branch; fork with edited
+- [x] Tests: fork with edited assistant response changes the branch; fork with edited
       tool result patches the outbound request (assert on mocked upstream's received
       body); lineage recorded
 
@@ -167,9 +167,43 @@ be off by *k*. The prefix is *replayed onto* the child exactly as a replay run
 accumulates it, so `fork_step` records where the branch leaves the tape, not how many
 rows were pre-inserted.
 
+Folded in while building (decisions from the Phase 3 design review):
+
+- [x] **`patch_tool_result` is a provider method**, the inverse of `extract_tool_results`.
+      Rewriting a result is as format-specific as reading one — a `role: "tool"` message
+      in one wire format, a `tool_result` block inside a user message in the other — and
+      the whole point of `providers/` is that `core/` never learns the difference. The
+      contract test asserts the two halves agree: what the patch puts in is what
+      extraction reads back
+- [x] **The edit is re-applied to every live call, not just the first.** Every request
+      carries the whole conversation, so patching only the first one would hand the real
+      tool result back to the model on the very next turn
+- [x] **Edits of different kinds at one step are refused.** Each kind puts the branch in
+      a different place, so mixing them is a contradiction rather than a merge: an edited
+      response at step *k* replaces the very tool calls a tool-result edit names, which
+      would leave that edit silently inert. Several tool results at one step are the
+      exception — a step can call more than one tool
+- [x] A `--edit-message I=FILE` prompt edit, since DESIGN.md §6 promised the outbound
+      patch mechanism covered system/user prompts and nothing exercised it
+- [x] **Re-running a fork that already ran is refused.** Position is how many steps the
+      fork has recorded, so a second run would resume in the middle of its own branch
+      rather than start it again. The error says how to make a fresh fork instead
+- [x] `Store.update_run` serializes `command` like it already did `meta` — the fork
+      learns its argv when it is re-run, which is the first time anything updated that
+      column rather than writing it at creation
+- [x] A fork **does** forward paths the tape never covered (`GET /models`), where a
+      replay refuses. A fork is a live run that starts from a tape; it has an upstream
+      and credentials by definition
+- [x] CI runs `examples/fork-demo/demo.py`. It is the launch GIF's fallback script and
+      the only check that goes through the real CLI, a real socket and a real SDK, so it
+      cannot be left to rot between now and launch week
+
 **Done when:** the demo script works end-to-end headlessly: example agent "fails" at
 step 9 → `agentvcr fork <run> --at 6 --edit-tool-result …` → re-run → passes, and
 `agentvcr diff` shows exactly where the branch diverged.
+**Done** — `examples/fork-demo/demo.py` is that script, against a scripted upstream that
+*reads the tool result*, so the different ending is caused by the edit rather than by a
+canned sequence advancing. `tests/test_fork.py` is the fast in-process form of it.
 
 ## Phase 5 — Web UI (week 3–4)
 

@@ -22,12 +22,13 @@ Anthropic wire format works — including Groq, Gemini, OpenRouter, Ollama and v
 
 ## Status
 
-Early development. **Record, replay and diff work** (phases 1–3), in both the OpenAI
-and Anthropic wire formats: the proxy forwards calls to any compatible upstream,
+Early development. **Record, replay, fork and diff work** (phases 1–4), in both the
+OpenAI and Anthropic wire formats: the proxy forwards calls to any compatible upstream,
 streaming included, writes every step to a local SQLite tape, reconstructs the tool
-timeline from those steps alone — and replays the tape offline, for free, without ever
-contacting an upstream. Fork and the web UI land in phases 4–5 — see
-[`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
+timeline from those steps alone, replays the tape offline for free without ever
+contacting an upstream, and branches a run at any step with an edited response, tool
+result or prompt. The web UI lands in phase 5 — see [`PLAN.md`](PLAN.md), and
+[`DESIGN.md`](DESIGN.md) for the architecture.
 
 ## Quickstart
 
@@ -91,6 +92,38 @@ calls *concurrently* replay in whatever order the race lands, which shows up as
 divergence rather than as a silent wrong answer. Both are measured in
 [`examples/framework-check/`](examples/framework-check/).
 
+## Fork & edit
+
+Replay answers *what did the agent do?* A fork answers **what would it have done?**
+
+```bash
+agentvcr fork <run-id> --at 6 --edit-tool-result search_flights=flights.json
+agentvcr run --mode fork --run <fork-id> -- python agent.py
+```
+
+Steps before the edit replay off the tape for free; from the edit onward the agent makes
+real calls, recorded onto the fork. Your agent is not touched — the edit is applied at
+the proxy, so the model reacts to it while the agent's own code, tools and prompt stay
+exactly as they were.
+
+**The edit is what defines the fork point.** Three kinds, and each puts the branch in
+the place its own mechanics require:
+
+| Flag | What happens |
+|---|---|
+| `--edit-response FILE` | steps `0…N-1` replay, step `N` is answered with your response, `N+1…` are live |
+| `--edit-tool-result NAME=FILE` | steps `0…N` replay; the result rides inside request `N+1`, so it is rewritten on the way upstream |
+| `--edit-message I=FILE` | a prompt edit: steps `0…N-1` replay, and request `N` goes live carrying the new message `I` |
+
+A fork is a run of its own — `parent_run_id`, `fork_step` and its edits — so lineage
+forms a tree and `agentvcr diff <run> <fork>` names exactly where the branch left the
+tape. It starts empty and collects its steps as it runs: the prefix is *replayed onto*
+it, never copied into it.
+
+[`examples/fork-demo/`](examples/fork-demo/) runs the whole story end to end with no API
+key: an agent gives up because its search returned nothing, one tool result is edited,
+and the same agent books a flight.
+
 ## Diff
 
 Two runs, compared step by step:
@@ -128,6 +161,8 @@ the run rather than merely not crashing.
 | `agentvcr serve` | Start the proxy (`--preset groq\|gemini\|openai\|anthropic`, `--port`, `--db`) |
 | `agentvcr run -- <cmd>` | Create a run, point the child at the proxy, record it, store its argv |
 | `agentvcr run --mode replay --run <id> -- <cmd>` | Replay a tape offline; no upstream, no tokens |
+| `agentvcr fork <run> --at N` | Branch a run at step N with an edit; prints the command to re-run it |
+| `agentvcr run --mode fork --run <id> -- <cmd>` | Re-run the agent against a fork: replay the prefix, then go live |
 | `agentvcr runs` | List recorded runs, newest first |
 | `agentvcr show <run>` | Interleaved LLM/tool timeline for one run (`--json` for the machine-readable form) |
 | `agentvcr diff <a> <b>` | Diff two runs step by step; exits 1 when they differ |

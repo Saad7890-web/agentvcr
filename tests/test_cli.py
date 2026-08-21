@@ -50,7 +50,7 @@ def test_serve_rejects_unknown_preset() -> None:
 def test_help_lists_the_shipped_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("serve", "run", "runs", "show", "diff"):
+    for command in ("serve", "run", "runs", "show", "diff", "fork"):
         assert command in rendered(result)
 
 
@@ -346,3 +346,188 @@ def test_diff_reports_an_unknown_run(tmp_path: Path) -> None:
 
     assert result.exit_code == 2
     assert "nosuchrun:NOPE" in rendered(result)  # rendered() drops the whitespace
+
+
+# --------------------------------------------------------------------------------- fork
+
+
+def _forkable_run(db: Path) -> str:
+    """A one-step recording whose step asks for a tool call, ready to be forked."""
+    with Store.open(db) as store:
+        run = store.create_run(mode="record", name="flights", provider="openai", command=["agent"])
+        store.add_step(
+            Step(
+                run_id=run.id,
+                idx=0,
+                request={"body": {"model": "m", "messages": [{"role": "system", "content": "hi"}]}},
+                response={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "id": "c1",
+                                        "function": {
+                                            "name": "search_flights",
+                                            "arguments": '{"from":"SFO"}',
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                },
+                status_code=200,
+            )
+        )
+        return run.id
+
+
+def test_fork_stores_the_edit_and_prints_how_to_re_run_it(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    run_id = _forkable_run(db)
+    edit = tmp_path / "flights.json"
+    edit.write_text(json.dumps({"flights": [{"price": 289}]}))
+
+    result = runner.invoke(
+        app,
+        [
+            "fork",
+            run_id,
+            "--at",
+            "0",
+            "--edit-tool-result",
+            f"search_flights={edit}",
+            "--db",
+            str(db),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "search_flights" in result.stdout
+    # The re-run command is the deliverable: it is what a Re-run button will spawn.
+    assert "--mode fork --run" in result.stdout
+    assert "-- agent" in result.stdout
+
+    with Store.open(db) as store:
+        fork = next(r for r in store.list_runs() if r.parent_run_id == run_id)
+        (stored,) = store.list_edits(fork.id)
+    assert fork.fork_step == 0
+    assert stored.patch["tool_call_id"] == "c1"
+    assert stored.patch["result"] == {"flights": [{"price": 289}]}
+
+
+def test_fork_explains_an_edit_it_cannot_apply(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    run_id = _forkable_run(db)
+    edit = tmp_path / "x.json"
+    edit.write_text("{}")
+
+    result = runner.invoke(
+        app,
+        ["fork", run_id, "--at", "0", "--edit-tool-result", f"book={edit}", "--db", str(db)],
+    )
+    assert result.exit_code == 1
+    assert "search_flights" in rendered(result)  # it names what the step did call
+
+
+def test_fork_reports_an_unknown_run(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["fork", "NOPE", "--at", "0", "--db", str(tmp_path / "a.db")])
+    assert result.exit_code == 1
+    assert "nosuchrun" in rendered(result)  # whitespace is stripped; see rendered()
+
+
+def test_show_names_the_fork_point_and_the_edit(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    run_id = _forkable_run(db)
+    edit = tmp_path / "flights.json"
+    edit.write_text("{}")
+    runner.invoke(
+        app,
+        [
+            "fork",
+            run_id,
+            "--at",
+            "0",
+            "--edit-tool-result",
+            f"search_flights={edit}",
+            "--db",
+            str(db),
+        ],
+    )
+    with Store.open(db) as store:
+        fork = next(r for r in store.list_runs() if r.parent_run_id == run_id)
+
+    result = runner.invoke(app, ["show", fork.id, "--db", str(db)])
+    assert result.exit_code == 0
+    assert f"forked from {run_id} at step 0" in result.stdout
+    assert "edited tool result of search_flights" in result.stdout
+
+
+def test_run_mode_fork_points_the_agent_at_the_fork_itself(tmp_path: Path) -> None:
+    """A fork already exists — that is where its edits live — so nothing is created."""
+    db = tmp_path / "a.db"
+    run_id = _forkable_run(db)
+    runner.invoke(app, ["fork", run_id, "--at", "0", "--db", str(db)])
+    with Store.open(db) as store:
+        fork_id = next(r for r in store.list_runs() if r.parent_run_id == run_id).id
+        before = len(store.list_runs())
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--mode",
+            "fork",
+            "--run",
+            fork_id,
+            "--db",
+            str(db),
+            "--",
+            sys.executable,
+            "-c",
+            f"import os; assert os.environ['AGENTVCR_RUN'] == {fork_id!r}",
+        ],
+    )
+    assert result.exit_code == 0
+    assert f"/r/{fork_id}" in result.output
+    assert f"branching from {run_id}" in result.output  # the parent, not the fork itself
+
+    with Store.open(db) as store:
+        assert len(store.list_runs()) == before  # no new run
+        assert store.get_run(fork_id).command[-1].startswith("import os")
+
+
+def test_run_refuses_to_re_run_a_fork_that_already_branched(tmp_path: Path) -> None:
+    """Position on the tape is how many steps the fork has, so a second run would
+    resume in the middle of its own branch instead of starting it again."""
+    db = tmp_path / "a.db"
+    run_id = _forkable_run(db)
+    runner.invoke(app, ["fork", run_id, "--at", "0", "--db", str(db)])
+    with Store.open(db) as store:
+        fork_id = next(r for r in store.list_runs() if r.parent_run_id == run_id).id
+        store.add_step(Step(run_id=fork_id, idx=0, request={"body": {}}, status_code=200))
+
+    result = runner.invoke(
+        app, ["run", "--mode", "fork", "--run", fork_id, "--db", str(db), "--", "true"]
+    )
+    assert result.exit_code != 0
+    assert "alreadyran" in rendered(result)  # whitespace is stripped; see rendered()
+
+
+def test_run_mode_fork_needs_a_fork(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["run", "--mode", "fork", "--db", str(tmp_path / "a.db"), "--", "true"]
+    )
+    assert result.exit_code != 0
+    assert "agentvcrfork" in rendered(result)  # whitespace is stripped; see rendered()
+
+
+def test_run_mode_fork_rejects_a_plain_recording(tmp_path: Path) -> None:
+    db = tmp_path / "a.db"
+    run_id = _forkable_run(db)
+    result = runner.invoke(
+        app, ["run", "--mode", "fork", "--run", run_id, "--db", str(db), "--", "true"]
+    )
+    assert result.exit_code != 0
+    assert "isnotafork" in rendered(result)

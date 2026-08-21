@@ -1,7 +1,7 @@
 """``agentvcr`` command line.
 
-Phases 1–3 ship ``serve``, ``run``, ``runs``, ``show`` and ``diff``; ``fork`` and
-``ui`` arrive with the phases that give them something to do.
+Phases 1–4 ship ``serve``, ``run``, ``runs``, ``show``, ``diff`` and ``fork``; ``ui``
+arrives with the phase that gives it something to do.
 """
 
 from __future__ import annotations
@@ -16,8 +16,17 @@ import typer
 
 from . import __version__
 from .config import MISMATCH_POLICIES, MODES, PRESETS, ConfigError, Settings, load_settings
-from .core import differ
-from .core.models import STATUS_COMPLETED, STATUS_DIVERGED, Run, Step, ToolCall
+from .core import differ, forker
+from .core.models import (
+    EDIT_REQUEST_PATCH,
+    EDIT_RESPONSE,
+    EDIT_TOOL_RESULT,
+    STATUS_COMPLETED,
+    STATUS_DIVERGED,
+    Run,
+    Step,
+    ToolCall,
+)
 from .core.store import Store
 from .providers import get_provider
 
@@ -111,7 +120,10 @@ def run(
     name: str | None = typer.Option(None, "--name", help="Human label for the run."),
     mode: str | None = typer.Option(None, "--mode", help=f"Run mode: {'|'.join(MODES)}."),
     tape: str | None = typer.Option(
-        None, "--run", metavar="RUN", help="Tape to replay (required by --mode replay)."
+        None,
+        "--run",
+        metavar="RUN",
+        help="Tape to replay (--mode replay), or the fork to run (--mode fork).",
     ),
     db: Path | None = DB_OPTION,
     config: Path | None = CONFIG_OPTION,
@@ -125,6 +137,10 @@ def run(
     ``--mode replay --run <id>`` replays an existing tape instead: the child is pointed
     at a fresh *replay* run linked to that tape, so the replay is recorded in its own
     right and the original recording is never written to.
+
+    ``--mode fork --run <id>`` re-runs a fork made by ``agentvcr fork``. That run
+    already exists — it is where the edits live — so this points the agent at it rather
+    than creating anything.
     """
     command = list(ctx.args)
     if not command:
@@ -136,13 +152,22 @@ def run(
 
     if settings.mode == "replay" and tape is None:
         raise typer.BadParameter("--mode replay needs a tape: agentvcr run --mode replay --run ID")
-    if tape is not None and settings.mode != "replay":
-        raise typer.BadParameter(f"--run is for replaying a tape; mode is {settings.mode!r}")
+    if settings.mode == "fork" and tape is None:
+        raise typer.BadParameter(
+            "--mode fork needs a fork to run; make one with `agentvcr fork <run> --at N`"
+        )
+    if tape is not None and settings.mode not in ("replay", "fork"):
+        raise typer.BadParameter(f"--run is for replaying or forking; mode is {settings.mode!r}")
 
     with _store(settings) as store:
         if tape is not None and store.get_run(tape) is None:
             raise typer.BadParameter(f"no such run to replay: {tape}")
-        created = store.create_run(mode=settings.mode, name=name, command=command, replay_of=tape)
+        if settings.mode == "fork":
+            created = _fork_to_run(store, tape, command=command)
+        else:
+            created = store.create_run(
+                mode=settings.mode, name=name, command=command, replay_of=tape
+            )
         env = {
             **os.environ,
             "AGENTVCR_RUN": created.id,
@@ -150,7 +175,11 @@ def run(
             "OPENAI_BASE_URL": f"{base}/r/{created.id}/openai/v1",
             "ANTHROPIC_BASE_URL": f"{base}/r/{created.id}/anthropic",
         }
-        via = f" replaying {tape}" if tape else ""
+        # A replay names the tape it was pointed at; a fork names the run it branched
+        # from, which is its parent — not the fork id, which is on the line already.
+        origin = created.parent_run_id if settings.mode == "fork" else tape
+        preposition = "branching from" if settings.mode == "fork" else "replaying"
+        via = f" {preposition} {origin}" if origin else ""
         typer.echo(f"run {created.id} — mode={settings.mode}{via} via {base}/r/{created.id}")
         if not _server_is_up(base):
             typer.secho(
@@ -174,9 +203,37 @@ def run(
         )
         steps = store.count_steps(created.id)
 
-    verb = "replayed" if settings.mode == "replay" else "recorded"
+    verb = {"replay": "replayed", "fork": "forked"}.get(settings.mode, "recorded")
     typer.echo(f"{verb} {steps} step(s) — agentvcr show {created.id}")
     raise typer.Exit(completed.returncode)
+
+
+def _fork_to_run(store: Store, fork_id: str, *, command: list[str]) -> Run:
+    """The existing fork run to point the agent at, checked over first.
+
+    A fork's steps are its branch, and its position on the tape is how many of them it
+    has (DESIGN.md §4) — so re-running one that already ran would resume in the middle
+    of its own branch rather than start it again. Fork afresh instead.
+    """
+    target = store.get_run(fork_id)
+    assert target is not None  # the caller looked it up already
+    if target.parent_run_id is None:
+        raise typer.BadParameter(
+            f"{fork_id} is not a fork; branch off it first with "
+            f"`agentvcr fork {fork_id} --at <step>`"
+        )
+    recorded = store.count_steps(fork_id)
+    if recorded:
+        raise typer.BadParameter(
+            f"fork {fork_id} already ran and holds {recorded} step(s); "
+            f"make a fresh one with `agentvcr fork {target.parent_run_id} "
+            f"--at {target.fork_step}`"
+        )
+    # The stored argv is what a Re-run button replays (DESIGN.md §6), and the fork was
+    # created before anyone knew what would be re-run.
+    store.update_run(fork_id, command=command)
+    target.command = command
+    return target
 
 
 @app.command(name="runs")
@@ -232,6 +289,7 @@ def show(
                         "run": target.as_dict(),
                         "steps": [s.as_dict() for s in steps],
                         "tool_calls": [t.as_dict() for t in store.list_tool_calls(target.id)],
+                        "edits": [e.as_dict() for e in store.list_edits(target.id)],
                     },
                     indent=2,
                     default=str,
@@ -245,6 +303,8 @@ def show(
             typer.echo(f"  command {' '.join(target.command)}")
         if target.parent_run_id:
             typer.echo(f"  forked from {target.parent_run_id} at step {target.fork_step}")
+            for edit in store.list_edits(target.id):
+                typer.echo(f"  edited {forker.describe(edit)}")
         if target.replay_of:
             live_from = target.meta.get("live_from")
             went_live = f", live from step {live_from}" if live_from is not None else ""
@@ -286,6 +346,104 @@ def show(
                         _compact(call.result)[:70] if call.result is not None else "(no result)",
                     )
                 )
+
+
+@app.command()
+def fork(
+    run_id: str = typer.Argument(..., metavar="RUN", help="Run to branch away from."),
+    at: int = typer.Option(
+        ..., "--at", metavar="N", help="Step to branch at, numbered as `agentvcr show` prints it."
+    ),
+    edit_response: Path | None = typer.Option(
+        None,
+        "--edit-response",
+        metavar="FILE",
+        help="Serve this response at step N instead of the recorded one.",
+    ),
+    edit_tool_result: list[str] = typer.Option(
+        None,
+        "--edit-tool-result",
+        metavar="NAME=FILE",
+        help="Give step N's call to tool NAME the result in FILE. Repeatable.",
+    ),
+    edit_message: list[str] = typer.Option(
+        None,
+        "--edit-message",
+        metavar="I=FILE",
+        help="Replace the content of message I of request N — a prompt edit.",
+    ),
+    name: str | None = typer.Option(None, "--name", help="Human label for the fork."),
+    db: Path | None = DB_OPTION,
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Branch a recorded run at step N, with an edit, and print how to re-run it.
+
+    The edit is what defines the fork point (DESIGN.md §6). Steps before it replay from
+    the tape for free; from the edit onward the agent makes real calls and reacts to
+    what you changed — which is the question a fork answers: *would it have gone
+    differently?*
+
+    The fork is created empty. It collects its steps when you re-run the agent against
+    it with the command this prints.
+    """
+    settings = _settings(db, config)
+    specs = _edit_specs(edit_response, edit_tool_result, edit_message)
+
+    with _store(settings) as store:
+        tape = store.get_run(run_id)
+        if tape is None:
+            typer.secho(f"no such run: {run_id}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        provider = get_provider(tape.provider or "openai")
+        if provider is None:
+            typer.secho(f"run {run_id} has an unknown format: {tape.provider}", fg="red", err=True)
+            raise typer.Exit(1)
+        try:
+            child = forker.create(
+                store, tape=tape, at=at, edits=specs, provider=provider, name=name
+            )
+        except forker.CannotFork as exc:
+            typer.secho(str(exc), fg=typer.colors.RED, err=True)
+            raise typer.Exit(1) from exc
+        edits = store.list_edits(child.id)
+        command = tape.command or ["<your agent command>"]
+
+    typer.echo(f"fork {child.id} — from {tape.id} at step {at}")
+    for edit in edits:
+        typer.echo(f"  edited {forker.describe(edit)}")
+    if not edits:
+        typer.echo(f"  no edits: steps 0…{at - 1} replay, then the agent runs live")
+    typer.echo("")
+    typer.echo("re-run it with:")
+    typer.echo(f"  agentvcr run --mode fork --run {child.id} -- {' '.join(command)}")
+
+
+def _edit_specs(
+    response: Path | None, tool_results: list[str] | None, messages: list[str] | None
+) -> list[forker.EditSpec]:
+    """Read the ``--edit-*`` flags off disk into the specs :mod:`forker` resolves."""
+    specs: list[forker.EditSpec] = []
+    if response is not None:
+        specs.append(forker.EditSpec(kind=EDIT_RESPONSE, value=_read_json(response)))
+    for kind, raw_values in ((EDIT_TOOL_RESULT, tool_results), (EDIT_REQUEST_PATCH, messages)):
+        for raw in raw_values or []:
+            target, separator, path = raw.partition("=")
+            if not separator:
+                raise typer.BadParameter(f"expected TARGET=FILE, got {raw!r}")
+            specs.append(forker.EditSpec(kind=kind, value=_read_json(Path(path)), target=target))
+    return specs
+
+
+def _read_json(path: Path) -> Any:
+    """An edit's new value. Anything JSON is fine; plain text is taken as a string."""
+    try:
+        text = path.read_text()
+    except OSError as exc:
+        raise typer.BadParameter(f"cannot read {path}: {exc}") from exc
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text
 
 
 @app.command()

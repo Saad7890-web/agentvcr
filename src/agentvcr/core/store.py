@@ -250,6 +250,8 @@ class Store:
             return
         if "meta" in fields:
             fields["meta_json"] = _dumps_meta(fields.pop("meta"))
+        if "command" in fields:
+            fields["command"] = _dumps_meta(fields["command"])
         allowed = {
             "name",
             "mode",

@@ -11,6 +11,7 @@ live in ``test_providers_openai.py`` and ``test_providers_anthropic.py``.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 
@@ -219,6 +220,28 @@ def test_tool_results_are_visible_in_the_next_request(case: Case) -> None:
     (result,) = case.provider.extract_tool_results(case.request)
     assert result == {"tool_call_id": "call_1", "result": {"flights": [{"price": 289}]}}
     assert case.provider.extract_tool_results({}) == []
+
+
+def test_a_tool_result_can_be_rewritten_on_its_way_upstream(case: Case) -> None:
+    """The inverse of extraction, and how a fork's edit reaches the model (§6).
+
+    What matters is that the format reads back what the patch put in — the two halves
+    have to agree, or an edited tool result would look applied and arrive unchanged.
+    """
+    patched = copy.deepcopy(case.request)
+    assert case.provider.patch_tool_result(patched, tool_call_id="call_1", result={"price": 1})
+    assert case.provider.extract_tool_results(patched) == [
+        {"tool_call_id": "call_1", "result": {"price": 1}}
+    ]
+    # The rest of the conversation is left exactly as it was.
+    assert case.provider.messages_of(patched)[:-1] == case.provider.messages_of(case.request)[:-1]
+
+
+def test_patching_a_result_the_request_does_not_carry_reports_it(case: Case) -> None:
+    """A fork patches every live call, including ones from before the call it edits."""
+    untouched = copy.deepcopy(case.request)
+    assert not case.provider.patch_tool_result(untouched, tool_call_id="nope", result={})
+    assert untouched == case.request
 
 
 def test_assistant_text_and_usage(case: Case) -> None:

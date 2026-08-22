@@ -114,3 +114,46 @@ def test_deleting_a_run_cascades(store: Store) -> None:
     store.add_step(Step(run_id=run.id, idx=0, request={}))
     store.conn.execute("DELETE FROM runs WHERE id = ?", (run.id,))
     assert store.count_steps(run.id) == 0
+
+
+def test_run_stats_folds_a_run_without_reading_its_conversations(store: Store) -> None:
+    """What a run listing needs, from the narrow columns only (DESIGN.md §8)."""
+    run = store.create_run(mode="record")
+    store.add_step(
+        Step(
+            run_id=run.id,
+            idx=0,
+            request={"body": {"messages": ["…"]}},
+            model="llama-3.1-8b",
+            usage={"total_tokens": 100},
+            status_code=200,
+        )
+    )
+    store.add_step(
+        Step(
+            run_id=run.id,
+            idx=1,
+            request={},
+            model="llama-3.1-8b",
+            # Anthropic reports the halves rather than a total; both fold into one number.
+            usage={"input_tokens": 20, "output_tokens": 5},
+            status_code=429,
+            diverged=True,
+        )
+    )
+    store.add_tool_call(ToolCall(run_id=run.id, after_step_idx=0, tool_name="search"))
+
+    stats = store.run_stats(run.id)
+    assert stats.steps == 2
+    assert stats.tool_calls == 1
+    assert stats.tokens == 125
+    assert stats.model == "llama-3.1-8b"
+    assert stats.errors == 1
+    assert stats.diverged is True
+
+
+def test_run_stats_of_a_run_with_no_steps_reports_no_tokens(store: Store) -> None:
+    """Zero tokens and "nobody counted" are different answers; a fresh fork is the latter."""
+    run = store.create_run(mode="fork")
+    assert store.run_stats(run.id).tokens is None
+    assert store.run_stats(run.id).steps == 0

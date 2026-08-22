@@ -1,7 +1,8 @@
 """``agentvcr`` command line.
 
-Phases 1–4 ship ``serve``, ``run``, ``runs``, ``show``, ``diff`` and ``fork``; ``ui``
-arrives with the phase that gives it something to do.
+``serve``, ``run``, ``runs``, ``show``, ``fork``, ``diff`` and ``ui`` — everything the
+web UI can do, and a few things it cannot. The two front ends share one engine: a
+command and a click both end up in :mod:`agentvcr.core`.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ import typer
 
 from . import __version__
 from .config import MISMATCH_POLICIES, MODES, PRESETS, ConfigError, Settings, load_settings
-from .core import differ, forker
+from .core import differ, forker, launch
 from .core.models import (
     EDIT_REQUEST_PATCH,
     EDIT_RESPONSE,
@@ -147,8 +148,7 @@ def run(
         raise typer.BadParameter("no command given; use: agentvcr run -- python agent.py")
 
     settings = _settings(db, config, mode=mode)
-    host = "127.0.0.1" if settings.host in {"0.0.0.0", "::"} else settings.host
-    base = f"http://{host}:{settings.port}"
+    base = launch.local_base(settings)
 
     if settings.mode == "replay" and tape is None:
         raise typer.BadParameter("--mode replay needs a tape: agentvcr run --mode replay --run ID")
@@ -166,14 +166,17 @@ def run(
             created = _fork_to_run(store, tape, command=command)
         else:
             created = store.create_run(
-                mode=settings.mode, name=name, command=command, replay_of=tape
+                mode=settings.mode,
+                name=name,
+                command=command,
+                replay_of=tape,
+                # Where the agent was started from, so the UI's Re-run button can start
+                # it from the same place rather than from wherever `serve` happens to run.
+                meta={"cwd": str(Path.cwd())},
             )
         env = {
             **os.environ,
-            "AGENTVCR_RUN": created.id,
-            "AGENTVCR_MODE": settings.mode,
-            "OPENAI_BASE_URL": f"{base}/r/{created.id}/openai/v1",
-            "ANTHROPIC_BASE_URL": f"{base}/r/{created.id}/anthropic",
+            **launch.agent_env(base, run_id=created.id, mode=settings.mode),
         }
         # A replay names the tape it was pointed at; a fork names the run it branched
         # from, which is its parent — not the fork id, which is on the line already.
@@ -251,7 +254,7 @@ def list_runs(
             return
         typer.echo(_row(RUNS_WIDTHS, "RUN", "CREATED", "MODE", "STATUS", "STEPS", "MODEL", "NAME"))
         for item in rows:
-            steps = store.list_steps(item.id)
+            stats = store.run_stats(item.id)
             typer.echo(
                 _row(
                     RUNS_WIDTHS,
@@ -259,8 +262,8 @@ def list_runs(
                     item.created_at[:19].replace("T", " "),
                     item.mode,
                     item.status,
-                    str(len(steps)),
-                    _first_model(steps),
+                    str(stats.steps),
+                    stats.model or "-",
                     _run_label(item),
                 )
             )
@@ -406,7 +409,7 @@ def fork(
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(1) from exc
         edits = store.list_edits(child.id)
-        command = tape.command or ["<your agent command>"]
+        command = tape.command
 
     typer.echo(f"fork {child.id} — from {tape.id} at step {at}")
     for edit in edits:
@@ -415,7 +418,7 @@ def fork(
         typer.echo(f"  no edits: steps 0…{at - 1} replay, then the agent runs live")
     typer.echo("")
     typer.echo("re-run it with:")
-    typer.echo(f"  agentvcr run --mode fork --run {child.id} -- {' '.join(command)}")
+    typer.echo(f"  {forker.rerun_command(child, command)}")
 
 
 def _edit_specs(
@@ -537,18 +540,8 @@ def _run_label(item: Run) -> str:
     return f"replay of {item.replay_of}" if item.replay_of else "-"
 
 
-def _first_model(steps: list[Step]) -> str:
-    for step in steps:
-        if step.model:
-            return step.model
-    return "-"
-
-
 def _tokens(step: Step) -> str:
-    usage = step.usage or {}
-    total = usage.get("total_tokens")
-    if total is None and {"input_tokens", "output_tokens"} <= usage.keys():
-        total = usage["input_tokens"] + usage["output_tokens"]
+    total = step.total_tokens
     return str(total) if total is not None else "-"
 
 

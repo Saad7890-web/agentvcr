@@ -43,6 +43,9 @@ def proxy(tmp_path: Path):
         store: Store
         settings: Settings
 
-    with TestClient(create_app(settings, store=opened)) as client:
+    # Dialed on the loopback rather than TestClient's default `testserver`: the control
+    # API refuses a host it was not bound to, which is what stops a rebound DNS name
+    # from reaching it (agentvcr.server.api).
+    with TestClient(create_app(settings, store=opened), base_url="http://127.0.0.1:8484") as client:
         yield Harness(client=client, store=opened, settings=settings)
     opened.close()

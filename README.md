@@ -22,13 +22,14 @@ Anthropic wire format works — including Groq, Gemini, OpenRouter, Ollama and v
 
 ## Status
 
-Early development. **Record, replay, fork and diff work** (phases 1–4), in both the
-OpenAI and Anthropic wire formats: the proxy forwards calls to any compatible upstream,
-streaming included, writes every step to a local SQLite tape, reconstructs the tool
-timeline from those steps alone, replays the tape offline for free without ever
-contacting an upstream, and branches a run at any step with an edited response, tool
-result or prompt. The web UI lands in phase 5 — see [`PLAN.md`](PLAN.md), and
-[`DESIGN.md`](DESIGN.md) for the architecture.
+Early development. **Record, replay, fork, diff and the web UI work** (phases 1–5), in
+both the OpenAI and Anthropic wire formats: the proxy forwards calls to any compatible
+upstream, streaming included, writes every step to a local SQLite tape, reconstructs the
+tool timeline from those steps alone, replays the tape offline for free without ever
+contacting an upstream, branches a run at any step with an edited response, tool result
+or prompt, and serves all of it from a local web UI at `/ui`. Left before v0.1.0:
+examples for the popular frameworks, `agentvcr rm`, and packaging QA — see
+[`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
 
 ## Quickstart
 
@@ -124,6 +125,39 @@ it, never copied into it.
 key: an agent gives up because its search returned nothing, one tool result is edited,
 and the same agent books a flight.
 
+## Web UI
+
+Everything above, without the terminal:
+
+```bash
+agentvcr ui        # starts the server if it is not already up, and opens the browser
+```
+
+```
+http://127.0.0.1:8484/ui
+```
+
+Five views, in the order a debugging session uses them: the **run list** (with forks and
+replays nested under the run they came from), the **timeline** (LLM steps interleaved
+with the tool runs between them, failures and divergence flagged), the **step inspector**
+(the conversation as sent, what the model answered, and the raw JSON behind both),
+**edit → fork** (change a response, a tool result or a prompt message and branch there —
+prefilled from what was recorded), and a **side-by-side diff**.
+
+The fork loop closes in the browser: a *Run it now* button re-runs the agent against the
+new fork and streams its output onto the page, so you watch the branch record itself and
+then open the diff. It re-runs the command `agentvcr run` stored on the run — nothing
+from the browser decides what gets executed.
+
+**The API behind it is guarded, and it has to be.** Any page your browser visits can
+send requests to `localhost:8484`, the tapes hold whole prompts, and re-running starts a
+process. So `/api` refuses cross-origin callers, and refuses a `Host` this server was
+never bound to — which is the shape DNS rebinding arrives in.
+
+The UI ships prebuilt in the wheel; no Node is needed to install or run agentvcr. From a
+source checkout, build it once with `npm --prefix ui install && npm --prefix ui run
+build` (see [`ui/README.md`](ui/README.md)) — every command works without it either way.
+
 ## Diff
 
 Two runs, compared step by step:
@@ -166,11 +200,14 @@ the run rather than merely not crashing.
 | `agentvcr runs` | List recorded runs, newest first |
 | `agentvcr show <run>` | Interleaved LLM/tool timeline for one run (`--json` for the machine-readable form) |
 | `agentvcr diff <a> <b>` | Diff two runs step by step; exits 1 when they differ |
+| `agentvcr ui` | Open the web UI (starts the server if nothing is serving yet) |
 
 ## Development
 
 ```bash
 pytest && ruff check . && ruff format --check .
+
+npm --prefix ui install && npm --prefix ui run build   # the web UI, once
 ```
 
 ## Configuration

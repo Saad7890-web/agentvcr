@@ -50,7 +50,7 @@ def test_serve_rejects_unknown_preset() -> None:
 def test_help_lists_the_shipped_commands() -> None:
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ("serve", "run", "runs", "show", "diff", "fork"):
+    for command in ("serve", "run", "runs", "show", "diff", "fork", "ui"):
         assert command in rendered(result)
 
 

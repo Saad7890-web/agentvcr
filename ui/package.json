@@ -1,0 +1,23 @@
+{
+  "name": "agentvcr-ui",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Web UI for agentvcr, built into src/agentvcr/ui_dist and bundled in the wheel.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.1.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2"
+  }
+}

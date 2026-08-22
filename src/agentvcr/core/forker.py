@@ -307,6 +307,16 @@ def _apply_request_patch(provider: Provider, body: dict[str, Any], patch: dict[s
 # -------------------------------------------------------------------------- display
 
 
+def rerun_command(fork_run: Run, command: list[str] | None) -> str:
+    """The command line that runs an agent against ``fork_run``.
+
+    Printed by ``agentvcr fork`` and shown by the UI after an edit — a fork is created
+    empty and only becomes a branch when something re-runs the agent against it.
+    """
+    argv = command or ["<your agent command>"]
+    return f"agentvcr run --mode fork --run {fork_run.id} -- {' '.join(argv)}"
+
+
 def describe(edit: Edit) -> str:
     """One line naming an edit, for ``agentvcr fork`` and ``agentvcr show``."""
     patch = edit.patch if isinstance(edit.patch, dict) else {}

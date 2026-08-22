@@ -8,7 +8,7 @@ into ``*_json``-free attribute names.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -33,6 +33,16 @@ def _dumps(value: Any) -> str | None:
     if value is None:
         return None
     return json.dumps(value, ensure_ascii=False, sort_keys=False)
+
+
+def total_tokens(usage: Mapping[str, Any] | None) -> int | None:
+    """Total tokens from a usage block. OpenAI reports a total, Anthropic the halves."""
+    if not usage:
+        return None
+    total = usage.get("total_tokens")
+    if total is None and {"input_tokens", "output_tokens"} <= usage.keys():
+        total = usage["input_tokens"] + usage["output_tokens"]
+    return total if isinstance(total, int) else None
 
 
 @dataclass
@@ -152,6 +162,11 @@ class Step:
         """Whether the upstream answered successfully (unknown status counts as ok)."""
         return self.status_code is None or self.status_code < 400
 
+    @property
+    def total_tokens(self) -> int | None:
+        """Tokens this call cost, however the wire format chose to report them."""
+        return total_tokens(self.usage)
+
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data.pop("response_chunks")
@@ -224,6 +239,52 @@ class Edit:
             "kind": self.kind,
             "patch_json": _dumps(self.patch),
         }
+
+    def as_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RunStats:
+    """Aggregates describing one run, for listings and headers.
+
+    Deliberately *not* derived from :class:`Step` objects. Every step's request carries
+    the whole conversation up to it (DESIGN.md §8), so building a run list out of full
+    steps would read every tape in the database to print a column of counts.
+    """
+
+    steps: int = 0
+    tool_calls: int = 0
+    tokens: int | None = None
+    model: str | None = None
+    diverged: bool = False
+    errors: int = 0
+
+    @classmethod
+    def from_rows(cls, rows: Iterable[Mapping[str, Any]], *, tool_calls: int = 0) -> RunStats:
+        """Fold the light step columns (``model``, ``usage_json``, status, divergence)."""
+        steps = tokens = errors = 0
+        model: str | None = None
+        counted = False
+        diverged = False
+        for row in rows:
+            steps += 1
+            model = model or row["model"]
+            step_tokens = total_tokens(_loads(row["usage_json"]))
+            if step_tokens is not None:
+                tokens, counted = tokens + step_tokens, True
+            status = row["status_code"]
+            if status is not None and status >= 400:
+                errors += 1
+            diverged = diverged or bool(row["diverged"])
+        return cls(
+            steps=steps,
+            tool_calls=tool_calls,
+            tokens=tokens if counted else None,
+            model=model,
+            diverged=diverged,
+            errors=errors,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

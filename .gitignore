@@ -17,10 +17,11 @@ dist/
 .coverage
 htmlcov/
 
-# UI
+# UI — the bundle is built by CI into the wheel, never committed
 node_modules/
 ui/dist/
-src/agentvcr/server/static/
+src/agentvcr/ui_dist/
+*.tsbuildinfo
 
 # Editors / OS
 .DS_Store

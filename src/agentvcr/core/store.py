@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import STATUS_ACTIVE, Edit, Run, Step, ToolCall
+from .models import STATUS_ACTIVE, Edit, Run, RunStats, Step, ToolCall
 
 # Crockford base32, as used by ULID: no I, L, O or U.
 _ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
@@ -311,6 +311,20 @@ class Store:
     def count_steps(self, run_id: str) -> int:
         row = self.conn.execute("SELECT COUNT(*) FROM steps WHERE run_id = ?", (run_id,)).fetchone()
         return int(row[0])
+
+    def run_stats(self, run_id: str) -> RunStats:
+        """Step counts, tokens, model and divergence for one run — without its bodies.
+
+        Only the narrow columns are selected: ``request_json`` holds an entire
+        conversation per step (DESIGN.md §8), and a run listing has no business
+        reading it.
+        """
+        rows = self.conn.execute(
+            "SELECT model, usage_json, status_code, diverged FROM steps "
+            "WHERE run_id = ? ORDER BY idx",
+            (run_id,),
+        ).fetchall()
+        return RunStats.from_rows(rows, tool_calls=self.count_tool_calls(run_id))
 
     def mark_diverged(self, run_id: str, idx: int) -> None:
         """Flag a *replay* step whose request drifted from the tape (DESIGN.md §5)."""

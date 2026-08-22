@@ -290,7 +290,8 @@ agentvcr/
 │   ├── server/
 │   │   ├── app.py                # FastAPI factory: proxy + control API + static UI
 │   │   ├── proxy.py              # /openai/*, /anthropic/* routes, SSE plumbing
-│   │   └── api.py                # REST for the UI: runs, steps, edits, fork, rerun
+│   │   ├── api.py                # REST for the UI: runs, steps, edits, fork, rerun
+│   │   └── jobs.py               # re-runs the UI started: spawn, watch, tail output
 │   ├── core/
 │   │   ├── store.py              # SQLite layer + migrations
 │   │   ├── models.py             # Run / Step / ToolCall / Edit dataclasses
@@ -298,14 +299,15 @@ agentvcr/
 │   │   ├── replayer.py           # positional matching, policies, SSE synthesis
 │   │   ├── forker.py             # fork creation, edit application, request patching
 │   │   ├── tools.py              # tool-call extraction from message diffs
-│   │   └── differ.py             # run alignment + step diffs
+│   │   ├── differ.py             # run alignment + step diffs
+│   │   └── launch.py             # the env that points an agent at a run (/r/<id>/…)
 │   └── providers/
 │       ├── base.py               # Provider interface: normalize, fingerprint,
 │       │                         #   extract/patch_tool_result, synthesize_stream
 │       ├── openai_chat.py        # /v1/chat/completions (covers Groq, Gemini-compat,
 │       │                         #   OpenRouter, Ollama, vLLM)
 │       └── anthropic_messages.py # /v1/messages
-├── ui/                           # Vite + React source → built into server/static/
+├── ui/                           # Vite + React source → built into src/agentvcr/ui_dist/
 ├── examples/                     # openai-agents-sdk/, langgraph/, crewai/, plain-loop/
 ├── tests/                        # incl. golden record→replay round-trip tests
 └── .github/workflows/ci.yml
@@ -326,17 +328,28 @@ replays cost zero tokens by construction.
 
 ## 10. Web UI (local, bundled)
 
-Served by the same process at `http://localhost:8484/ui`. Views:
+Served by the same process at `http://localhost:8484/ui`, over a REST control API at
+`/api`. Views:
 
-1. **Run list** — table with status, model, steps, tokens, cost estimate, fork lineage tree.
+1. **Run list** — table with status, model, steps, tokens, and fork/replay lineage: a
+   branch is nested under the run it came from.
 2. **Timeline** — the hero view: interleaved LLM/tool steps; failed/diverged steps flagged.
 3. **Step inspector** — pretty-rendered messages, raw JSON toggle, usage/latency.
-4. **Edit → fork** — edit a response or tool result in place → creates the fork run and
-   shows the re-run command (or a *Re-run* button when the original command is stored).
+4. **Edit → fork** — edit a response, a tool result or a prompt message in place,
+   prefilled with what was recorded → creates the fork run and shows the re-run command,
+   with a *Run it now* button when the original command is stored.
 5. **Diff** — pick two runs, side-by-side with divergence markers.
 
 Static build committed nowhere — built in CI and bundled into the wheel, so
-`pip install agentvcr` ships the UI with no Node required at install time.
+`pip install agentvcr` ships the UI with no Node required at install time. A source
+checkout that has not run the build gets a page saying how, rather than a 404.
+
+**Re-running is the UI's only side effect on the machine**, and it is deliberately
+narrow: `POST /api/runs/<id>/rerun` spawns the argv that `agentvcr run` stored on that
+run, as a list, with the fork/replay environment. Nothing in the request decides what
+gets executed — only *which run* to re-run. A fork is re-run as itself and only once
+(its position on the tape is how many steps it has recorded, §4); anything else is
+re-run as a fresh replay of its tape, which costs nothing.
 
 ## 11. Security & privacy
 
@@ -345,6 +358,15 @@ Static build committed nowhere — built in CI and bundled into the wheel, so
   before persistence; regex-based body redaction as a follow-up.
 - Recordings may contain sensitive prompt data — README ships a recommended
   `.gitignore` entry for `.agentvcr/`.
+- **The control API is guarded against the browser it is served to.** Binding to
+  localhost keeps other machines out, but every page the user visits can send requests
+  to `localhost:8484` — and `/api` hands out whole recorded prompts and can start a
+  process. So it refuses a request whose `Origin` is not this server's own, and a
+  request addressed to a `Host` this server was never bound to, which is what DNS
+  rebinding looks like from the inside. A request with no `Origin` (curl, the CLI) is
+  allowed: it is not a browser, and a program that can run curl can read the tape file
+  anyway. The proxy routes are not guarded — an agent is exactly the non-browser client
+  the check has to let through.
 
 ## 12. Explicit non-goals (MVP)
 

@@ -207,28 +207,66 @@ canned sequence advancing. `tests/test_fork.py` is the fast in-process form of i
 
 ## Phase 5 — Web UI (week 3–4)
 
-- [ ] `ui/` Vite + React; build output bundled into the wheel (CI builds it; no Node
+- [x] `ui/` Vite + React; build output bundled into the wheel (CI builds it; no Node
       needed at install time)
-- [ ] `server/api.py`: REST for runs/steps/tool-calls/diff/edits/fork + `POST rerun`
+- [x] `server/api.py`: REST for runs/steps/tool-calls/diff/edits/fork + `POST rerun`
       (spawns the stored command with fork env — only for runs launched via
       `agentvcr run`)
-- [ ] Views in order of demo value: run list → timeline → step inspector →
+- [x] Views in order of demo value: run list → timeline → step inspector →
       edit-modal-creates-fork (+ Re-run button) → diff side-by-side. **Ship the first
       four**; the side-by-side diff can wait if the week runs out, since `agentvcr diff`
-      already covers it in the terminal
-- [ ] Refuse cross-origin calls to `/api/*` (`Origin` check, or a token minted into the
+      already covers it in the terminal. **All five shipped** — the diff view is the
+      differ's own output in two columns, which was an afternoon, not a week
+- [x] Refuse cross-origin calls to `/api/*` (`Origin` check, or a token minted into the
       URL `agentvcr ui` opens), **in the same commit that adds the routes**. Any page the
       user's browser visits can reach `localhost:8484`; the tapes hold whole prompts and
       `POST rerun` spawns a stored command line
-- [ ] CI: the wheel job needs Node to build `ui/` — today it only installs Python
-- [ ] `agentvcr ui` opens the browser
+- [x] CI: the wheel job needs Node to build `ui/` — today it only installs Python
+- [x] `agentvcr ui` opens the browser
+
+Folded in while building (decisions from the Phase 4 design review):
+
+- [x] **The guard is `Origin` *and* `Host`, and no token.** The plan offered either; the
+      Origin check won because it needs no state — a token has to be minted into a file
+      both processes can read, and it then leaks into shell history and `Referer`. But
+      Origin alone loses to DNS rebinding, where the attacker's page *becomes* this
+      origin, so a server bound to the loopback also insists it was dialed on one. A
+      request with no `Origin` at all (curl, the tests) is allowed through deliberately:
+      a program that can run curl can read the tape file directly, so refusing it would
+      buy nothing and break every non-browser client
+- [x] **`POST rerun` runs the argv stored on the run, and nothing from the request.**
+      The browser can choose *which run* to re-run; what that means was decided when the
+      run was recorded. It is spawned as an argv list, never through a shell
+- [x] **Re-running a recording replays it; re-running a fork branches it — once.** A
+      fork's position on the tape is how many steps it has recorded (phase 4), so the
+      API refuses a second run of one exactly as the CLI does, and says to fork again
+- [x] **A run listing reads narrow columns** (`Store.run_stats`). Every step's request
+      holds the whole conversation up to it (DESIGN.md §8), so building a list of counts
+      out of full steps reads every tape in the database. `agentvcr runs` had the same
+      bug and now shares the fix
+- [x] **`agentvcr run` records its working directory** on the run. The Re-run button
+      starts the agent where it was first started, rather than wherever `agentvcr serve`
+      happens to have been run from
+- [x] The run-scoped base URL (`/r/<id>/openai/v1`) now has two launchers — the CLI and
+      the Re-run button — so its shape moved to `core/launch.py` rather than being
+      spelled out in both
+- [x] **A checkout with no built bundle says so.** `/ui` answers with the two commands
+      that build it instead of a 404, because a wheel ships it prebuilt and a contributor
+      hitting a blank page has no way to tell those two situations apart
+- [x] Re-run jobs live in memory and die with the server, and an agent the UI started is
+      stopped when the server stops. What the run produced is on the tape either way
 
 **Done when:** the 30-second GIF is recordable entirely in the UI: open failing run →
 click step 6 → edit tool result → Re-run → watch the forked run pass → open diff.
+**Done** — driven end to end in a real browser against a real server: the recorded run
+gives up, the step-0 tool result is edited in the modal (prefilled with what was
+recorded), *Run it now* re-runs the agent, step 0 replays in 0ms while step 1 goes live,
+the branch answers "The cheapest is B6918 at $289", and the diff names step 0 as where
+they parted. `tests/test_api.py` is the automated form of that path.
 
 **Fallback, decided up front:** the launch GIF must not be blocked on the UI. The
 headless demo script from Phase 4 is recordable in a terminal and tells the same story;
-if Phase 5 slips, the GIF ships from there and the UI lands in v0.2.
+if Phase 5 slips, the GIF ships from there and the UI lands in v0.2. **Not needed.**
 
 ## Phase 6 — Polish & launch (week 4–5)
 

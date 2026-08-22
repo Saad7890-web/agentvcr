@@ -49,15 +49,26 @@ jobs:
       - run: pip install -e '.[dev]' openai
       - run: python examples/fork-demo/demo.py
 
+  # The wheel carries the web UI prebuilt, so this job needs Node as well as Python —
+  # `pip install agentvcr` must never require a JavaScript toolchain (PLAN.md phase 5).
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm --prefix ui ci
+      - run: npm --prefix ui run build
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install build
       - run: python -m build
+      - name: the bundle is in the wheel
+        run: python -c "import glob, zipfile, sys; names = zipfile.ZipFile(sorted(glob.glob('dist/*.whl'))[-1]).namelist(); sys.exit(0 if 'agentvcr/ui_dist/index.html' in names else 'the wheel has no UI bundle')"
       - uses: actions/upload-artifact@v4
         with:
           name: dist

@@ -56,7 +56,11 @@ artifacts = ["src/agentvcr/ui_dist/**"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/agentvcr", "ui", "tests", "README.md", "LICENSE", "pyproject.toml"]
-exclude = ["ui/node_modules", "ui/dist", "src/agentvcr/ui_dist"]
+exclude = ["ui/node_modules", "ui/dist"]
+# The sdist carries the built bundle as well as the ui/ sources it came from. `python -m
+# build` builds the wheel *from the sdist*, so a bundle left out here is a bundle missing
+# from the wheel — and installing from an sdist would otherwise need Node to get a UI.
+artifacts = ["src/agentvcr/ui_dist/**"]
 
 [tool.ruff]
 line-length = 100

@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -272,6 +272,70 @@ class Store:
             self.conn.execute(
                 f"UPDATE runs SET {assignments} WHERE id = ?", (*fields.values(), run_id)
             )
+
+    def runs_before(self, timestamp: str) -> list[Run]:
+        """Every run recorded strictly before ``timestamp`` (an ISO-8601 string).
+
+        ``created_at`` is written by :func:`utcnow` in one fixed format, so comparing
+        the strings orders them the way comparing the instants would.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM runs WHERE created_at < ? ORDER BY created_at DESC, id DESC",
+            (timestamp,),
+        ).fetchall()
+        return [Run.from_row(r) for r in rows]
+
+    def run_children(self, run_id: str) -> list[Run]:
+        """Runs derived from this one: the forks branched off it, and its replays."""
+        rows = self.conn.execute(
+            "SELECT * FROM runs WHERE parent_run_id = ? OR replay_of = ? "
+            "ORDER BY created_at DESC, id DESC",
+            (run_id, run_id),
+        ).fetchall()
+        return [Run.from_row(r) for r in rows]
+
+    def run_descendants(self, run_ids: Iterable[str]) -> list[Run]:
+        """The transitive closure of :meth:`run_children`, excluding the roots given.
+
+        A fork of a replay of a recording is two links away from it, and deleting that
+        recording leaves the fork as unrunnable as deleting its direct parent would.
+        """
+        roots = set(run_ids)
+        found: dict[str, Run] = {}
+        frontier = list(roots)
+        while frontier:
+            for child in self.run_children(frontier.pop()):
+                if child.id in roots or child.id in found:
+                    continue
+                found[child.id] = child
+                frontier.append(child.id)
+        return sorted(found.values(), key=lambda r: (r.created_at, r.id), reverse=True)
+
+    def delete_runs(self, run_ids: Iterable[str]) -> int:
+        """Delete runs and everything hanging off them; returns how many were deleted.
+
+        Their steps, tool calls and edits go too, by ``ON DELETE CASCADE`` — and
+        ``PRAGMA foreign_keys`` is on, so the database enforces that rather than
+        trusting this method to remember. A *surviving* run that pointed at a deleted
+        one keeps its rows and loses the link (``ON DELETE SET NULL``), which is why
+        the CLI refuses to leave one behind without ``--recursive``.
+        """
+        ids = list(dict.fromkeys(run_ids))
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self.transaction() as conn:
+            cursor = conn.execute(f"DELETE FROM runs WHERE id IN ({placeholders})", tuple(ids))
+            return int(cursor.rowcount or 0)
+
+    def vacuum(self) -> None:
+        """Rebuild the database file so deleted tapes stop occupying disk.
+
+        SQLite keeps freed pages for reuse; without this, deleting the 200-step run that
+        sent someone looking for ``rm`` leaves the file exactly as large as it was.
+        """
+        with self._lock:
+            self.conn.execute("VACUUM")
 
     # ---------------------------------------------------------------------- steps
 

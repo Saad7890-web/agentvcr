@@ -1,6 +1,6 @@
 """``agentvcr`` command line.
 
-``serve``, ``run``, ``runs``, ``show``, ``fork``, ``diff`` and ``ui`` — everything the
+``serve``, ``run``, ``runs``, ``show``, ``rm``, ``fork``, ``diff`` and ``ui`` — everything the
 web UI can do, and a few things it cannot. The two front ends share one engine: a
 command and a click both end up in :mod:`agentvcr.core`.
 """
@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -350,6 +352,160 @@ def show(
                         _compact(call.result)[:70] if call.result is not None else "(no result)",
                     )
                 )
+
+
+@app.command(name="rm")
+def remove(
+    run_ids: list[str] = typer.Argument(None, metavar="RUN...", help="Run ids to delete."),
+    before: str | None = typer.Option(
+        None,
+        "--before",
+        metavar="DATE",
+        help="Also delete every run recorded before DATE (YYYY-MM-DD, or an ISO-8601 timestamp).",
+    ),
+    recursive: bool = typer.Option(
+        False,
+        "--recursive",
+        "-r",
+        help="Delete the runs derived from these too: their replays, and their forks.",
+    ),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Delete without asking."),
+    db: Path | None = DB_OPTION,
+    config: Path | None = CONFIG_OPTION,
+) -> None:
+    """Delete runs and their steps, tool calls and edits.
+
+    Every step stores the whole conversation up to it (DESIGN.md §8), so a long run is
+    a large run and a tape grows quadratically. This is the way to get that space back
+    short of deleting the database: what it removes it removes for good, and the file
+    is rebuilt afterwards so the disk actually comes free.
+    """
+    settings = _settings(db, config)
+    cutoff = _before_timestamp(before) if before is not None else None
+
+    with _store(settings) as store:
+        selected: dict[str, Run] = {}
+        missing = []
+        for run_id in run_ids or []:
+            found = store.get_run(run_id)
+            if found is None:
+                missing.append(run_id)
+            else:
+                selected[found.id] = found
+        if missing:
+            typer.secho(f"no such run: {', '.join(missing)}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(1)
+        if cutoff is not None:
+            for item in store.runs_before(cutoff):
+                selected.setdefault(item.id, item)
+
+        if not selected:
+            typer.echo(
+                f"no runs recorded before {before}"
+                if cutoff is not None
+                else "nothing to delete: name a run, or pass --before DATE"
+            )
+            raise typer.Exit(0 if cutoff is not None else 1)
+
+        # A fork replays its prefix off its parent's tape and a replay is labelled by
+        # the run it replayed, so deleting one out from under the other is a silent
+        # break: ON DELETE SET NULL leaves the child in place with its lineage erased.
+        derived = store.run_descendants(selected)
+        if derived and not recursive:
+            typer.secho(
+                f"refusing to delete: {len(derived)} run(s) derived from "
+                f"{'these' if len(selected) > 1 else 'this one'} would be left orphaned",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            for item in derived[:10]:
+                typer.secho(f"  {item.id}  {_run_label(item)}", err=True)
+            if len(derived) > 10:
+                typer.secho(f"  … and {len(derived) - 10} more", err=True)
+            typer.secho("pass --recursive to delete them too", err=True)
+            raise typer.Exit(1)
+        for item in derived:
+            selected[item.id] = item
+
+        doomed = sorted(selected.values(), key=lambda r: (r.created_at, r.id), reverse=True)
+        steps = sum(store.count_steps(item.id) for item in doomed)
+
+        typer.echo(_row(RUNS_WIDTHS, "RUN", "CREATED", "MODE", "STATUS", "STEPS", "MODEL", "NAME"))
+        for item in doomed:
+            stats = store.run_stats(item.id)
+            typer.echo(
+                _row(
+                    RUNS_WIDTHS,
+                    item.id,
+                    item.created_at[:19].replace("T", " "),
+                    item.mode,
+                    item.status,
+                    str(stats.steps),
+                    stats.model or "-",
+                    _run_label(item),
+                )
+            )
+        if not yes:
+            typer.confirm(f"delete {len(doomed)} run(s) and {steps} step(s)?", abort=True, err=True)
+
+        before_bytes = _db_bytes(settings.db_path)
+        deleted = store.delete_runs([item.id for item in doomed])
+        reclaimed = _reclaim(store, settings.db_path, before_bytes)
+
+    typer.echo(f"deleted {deleted} run(s), {steps} step(s){reclaimed}")
+
+
+def _before_timestamp(value: str) -> str:
+    """A ``--before`` argument as one of the ISO-8601 strings ``created_at`` holds.
+
+    A bare date means midnight UTC that morning, so ``--before 2026-08-23`` keeps
+    everything recorded on the 23rd — the reading that makes "older than" a whole
+    number of days.
+    """
+    text = value.strip()
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise typer.BadParameter(
+            f"--before wants a date or an ISO-8601 timestamp, not {value!r}"
+        ) from exc
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _db_bytes(path: Path | None) -> int | None:
+    """Size of the tape on disk, write-ahead log included.
+
+    Recent writes live in the ``-wal`` sidecar until SQLite checkpoints them, so the
+    main file alone under-reports a database that was just written to — and VACUUM
+    folds the sidecar back in, which would make the two measurements incomparable.
+    """
+    if path is None:
+        return None
+    total = 0
+    for candidate in (path, path.with_name(path.name + "-wal")):
+        try:
+            total += candidate.stat().st_size
+        except OSError:
+            pass
+    return total or None
+
+
+def _reclaim(store: Store, path: Path | None, before_bytes: int | None) -> str:
+    """VACUUM the tape, and say how much disk that gave back.
+
+    Skipped rather than fatal when the file is busy: a running `agentvcr serve` holds
+    write locks, and the delete is already committed by the time we get here.
+    """
+    try:
+        store.vacuum()
+    except sqlite3.OperationalError:
+        return " (database busy; space will be reused, not returned)"
+    after_bytes = _db_bytes(path)
+    if before_bytes is None or after_bytes is None or after_bytes >= before_bytes:
+        return ""
+    return f", {(before_bytes - after_bytes) / 1024:.0f} KiB freed"
 
 
 @app.command()

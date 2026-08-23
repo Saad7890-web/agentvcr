@@ -28,7 +28,7 @@ upstream, streaming included, writes every step to a local SQLite tape, reconstr
 tool timeline from those steps alone, replays the tape offline for free without ever
 contacting an upstream, branches a run at any step with an edited response, tool result
 or prompt, and serves all of it from a local web UI at `/ui`. Left before v0.1.0:
-examples for the popular frameworks, `agentvcr rm`, and packaging QA — see
+examples for the popular frameworks, and packaging QA — see
 [`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
 
 ## Quickstart
@@ -200,6 +200,7 @@ the run rather than merely not crashing.
 | `agentvcr runs` | List recorded runs, newest first |
 | `agentvcr show <run>` | Interleaved LLM/tool timeline for one run (`--json` for the machine-readable form) |
 | `agentvcr diff <a> <b>` | Diff two runs step by step; exits 1 when they differ |
+| `agentvcr rm <run>…` | Delete runs and their steps (`--before DATE` by age, `-r` for the replays and forks derived from them) |
 | `agentvcr ui` | Open the web UI (starts the server if nothing is serving yet) |
 
 ## Development
@@ -237,7 +238,8 @@ Environment equivalents: `AGENTVCR_PORT`, `AGENTVCR_DB`, `AGENTVCR_MODE`,
 The proxy binds to `127.0.0.1` by default. `Authorization`, `x-api-key` and cookie
 headers are forwarded upstream but **never written to disk** — a test asserts the key
 appears nowhere in the database file. Recordings do contain your prompts, so add
-`.agentvcr/` to your `.gitignore`.
+`.agentvcr/` to your `.gitignore` — and `agentvcr rm` deletes the ones you would
+rather not keep, rebuilding the file so the disk comes back with them.
 
 ## License
 

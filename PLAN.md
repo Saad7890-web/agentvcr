@@ -276,10 +276,15 @@ if Phase 5 slips, the GIF ships from there and the UI lands in v0.2. **Not neede
 - [ ] README: hero GIF, quickstart (`uvx agentvcr serve` + three commands), honest
       limitations section (tool re-execution, concurrency), `.gitignore` note for
       `.agentvcr/`
-- [ ] `agentvcr rm <run>…` (with `--before <date>`): nothing in phases 0–5 deletes a
+- [x] `agentvcr rm <run>…` (with `--before <date>`): nothing in phases 0–5 deletes a
       tape and storage is quadratic in run length (DESIGN.md §8), so a first user who
       records a 200-step run has no way out but `rm -rf .agentvcr/`. The schema already
-      cascades, so this is small — it just has to exist before launch
+      cascades, so this is small — it just has to exist before launch.
+      **Deleting a run that others were derived from is refused without `--recursive`**:
+      `ON DELETE SET NULL` would leave a fork in place with its lineage erased and its
+      prefix unreplayable, which is a worse outcome than the error. And the delete is
+      followed by a `VACUUM` — SQLite keeps freed pages for reuse, so without it the
+      200-step run is gone and the file is exactly as large as it was
 - [ ] Package QA: `pip install agentvcr` from TestPyPI on a clean machine; version
       pinning; `--help` text pass
 - [ ] Publish to PyPI; tag v0.1.0

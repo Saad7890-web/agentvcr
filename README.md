@@ -5,6 +5,12 @@ every LLM call and tool call from any agent run into a local file, then determin
 replays the run for free, forks it at any step, lets you edit a prompt or a tool result,
 re-runs from that exact point, and diffs two runs side by side.
 
+![record a failing run, fork it with one edited tool result, re-run, diff](examples/fork-demo/demo.gif)
+
+That is [`examples/fork-demo/`](examples/fork-demo/), which runs with no API key: an agent
+gives up because its flight search came back empty, one tool result is replaced, and the
+same agent — unchanged — books the flight.
+
 ```python
 from openai import OpenAI
 
@@ -30,21 +36,30 @@ contacting an upstream, branches a run at any step with an edited response, tool
 or prompt, and serves all of it from a local web UI at `/ui`. There are runnable
 examples for [LangGraph](examples/langgraph/), the
 [OpenAI Agents SDK](examples/openai-agents-sdk/) and [CrewAI](examples/crewai/), each
-verified by recording it, killing the model, and replaying. Left before v0.1.0:
-packaging QA — see [`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the
-architecture.
+verified by recording it, killing the model, and replaying. The wheel and the sdist
+install clean on a fresh interpreter, with the web UI prebuilt and no Node needed. Left
+before v0.1.0: the launch recording, and publishing — see [`PLAN.md`](PLAN.md), and
+[`DESIGN.md`](DESIGN.md) for the architecture, or [Limitations](#limitations) for what it
+does not do.
 
 ## Quickstart
 
 ```bash
-pip install -e '.[dev]'        # from a checkout; the PyPI release lands at v0.1.0
-
-agentvcr serve --preset groq                        # terminal 1
-agentvcr run --name flights -- python agent.py      # terminal 2
-
-agentvcr runs
-agentvcr show <run-id>
+uvx agentvcr serve --preset groq                    # terminal 1 — nothing to install
 ```
+
+```bash
+agentvcr run --name flights -- python agent.py      # terminal 2 — record it
+agentvcr show <run-id>                              # what the agent and the model said
+agentvcr run --mode replay --run <run-id> -- python agent.py    # again, free, offline
+```
+
+`uv tool install agentvcr`, `pipx install agentvcr` and `pip install agentvcr` all put the
+same command on your `PATH`; `uvx` runs it without installing anything at all. Until
+v0.1.0 is tagged nothing is on PyPI yet — from a checkout it is `pip install -e '.[dev]'`.
+
+The tape is one SQLite file at `.agentvcr/agentvcr.db`. It holds your prompts, so put
+`.agentvcr/` in your `.gitignore` before the first run.
 
 ```
 STEP  MODEL                   HTTP  LATENCY   TOKENS  RESPONSE
@@ -90,11 +105,9 @@ agent has drifted from what was recorded, and what happens then is
 | `strict` | refuse with a `409` — the setting for CI |
 | `live-on-miss` | stop replaying and go live from that step onward (auto-fork) |
 
-Known limits: replay is deterministic at the LLM boundary, but your **tools still
-execute locally** — a tool with side effects will re-fire. And agents that issue LLM
-calls *concurrently* replay in whatever order the race lands, which shows up as
-divergence rather than as a silent wrong answer. Both are measured in
-[`examples/framework-check/`](examples/framework-check/).
+Replay is deterministic at the LLM boundary, and only there — your tools still execute
+locally, and concurrent calls replay in whatever order the race lands. Both are measured
+rather than assumed; see [Limitations](#limitations).
 
 ## Fork & edit
 
@@ -190,6 +203,38 @@ differ between any two live calls.
 `diff` exits 1 when the runs differ, like `diff(1)`. A recording diffed against its own
 replay should always come back identical — that is what proves the replay reproduced
 the run rather than merely not crashing.
+
+## Limitations
+
+These are properties of the design rather than a bug list, and each one is measured
+somewhere in this repository:
+
+- **Your tools still run, every time.** agentvcr records and replays the *LLM* boundary;
+  tools execute inside your own process and the proxy never sees them. A replay re-fires
+  anything with a side effect — the email, the payment, the write. An optional stubbing
+  shim for people who need tools frozen too is post-MVP.
+- **Concurrent LLM calls replay by position, so fan-out is a race.** An agent that issues
+  two calls at once can have them arrive in the other order on replay, and each branch
+  then gets the other's answer. Over five runs of the probe in
+  [`examples/framework-check/`](examples/framework-check/) it landed wrong twice. It is
+  always *flagged* — the steps fail their fingerprint check and the run is marked
+  `diverged` — so it is never quietly wrong, but for fan-out that is the honest ceiling
+  until fingerprint-first matching lands.
+- **Two wire formats, one path each.** `POST /chat/completions` and `POST /v1/messages`
+  are what gets recorded. Anything else your SDK sends — the Responses API,
+  embeddings, `/models` — is forwarded upstream but not written to the tape, and a
+  replay has nothing to answer it with. The OpenAI Agents SDK defaults to
+  `/v1/responses`, which is why [its example](examples/openai-agents-sdk/) turns that off.
+- **A tape grows with the square of the run.** Every step stores the whole conversation
+  that produced it, so step 200 carries 200 messages. Long runs get large fast;
+  `agentvcr rm` is the way back, and it rebuilds the file so the disk actually returns.
+- **Your prompts are on disk in the clear.** Credentials are not — `Authorization`,
+  `x-api-key` and cookies are forwarded and never written, and a test asserts the key
+  appears nowhere in the file — but prompts, tool arguments and tool results are stored
+  as they were sent. There are no redaction rules yet.
+- **One machine, one file, one person.** The proxy binds to `127.0.0.1`, the control API
+  refuses cross-origin callers, and there is no authentication because there is nothing
+  multi-user to authenticate. A tape is a local file, not a service.
 
 ## Commands
 

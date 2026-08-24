@@ -7,6 +7,6 @@ forks it at any step, and diffs two runs.
 See DESIGN.md for the architecture and PLAN.md for the build order.
 """
 
-__version__ = "0.1.0.dev0"
+__version__ = "0.1.0"
 
 __all__ = ["__version__"]

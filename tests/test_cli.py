@@ -31,9 +31,18 @@ def rendered(result) -> str:
 
 
 def test_version() -> None:
+    """Both spellings, because both are what someone reaches for first.
+
+    `--version` is what a person types and what a bug report asks for; `agentvcr
+    version` is what a script calls. They have to agree.
+    """
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert result.stdout.strip() == __version__
+
+    flag = runner.invoke(app, ["--version"])
+    assert flag.exit_code == 0
+    assert flag.stdout.strip() == __version__
 
 
 def test_help_lists_serve() -> None:
@@ -52,6 +61,18 @@ def test_help_lists_the_shipped_commands() -> None:
     assert result.exit_code == 0
     for command in ("serve", "run", "runs", "show", "rm", "diff", "fork", "ui"):
         assert command in rendered(result)
+
+
+def test_every_command_documents_itself() -> None:
+    """`--help` has to work for every subcommand, without a tape or a config.
+
+    It is the first thing a new install is asked to do, and the last thing anyone
+    thinks to test: a command whose help crashes looks like a broken package.
+    """
+    for command in ("serve", "run", "runs", "show", "rm", "diff", "fork", "ui", "version"):
+        result = runner.invoke(app, [command, "--help"])
+        assert result.exit_code == 0, command
+        assert "Usage:" in rendered(result), command
 
 
 def test_run_requires_a_command(tmp_path: Path) -> None:

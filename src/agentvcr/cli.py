@@ -45,6 +45,29 @@ DB_OPTION = typer.Option(None, "--db", help="SQLite tape path (default .agentvcr
 CONFIG_OPTION = typer.Option(None, "--config", help="Path to an agentvcr.toml.")
 
 
+def _print_version(value: bool) -> None:
+    if value:
+        typer.echo(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def _root(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_print_version,
+        is_eager=True,
+        help="Print the agentvcr version and exit.",
+    ),
+) -> None:
+    """VCR for AI agents: record, replay, fork and diff agent runs through a proxy.
+
+    `agentvcr version` prints the same string, for a script that would rather call a
+    subcommand than parse a flag.
+    """
+
+
 def _settings(db: Path | None = None, config: Path | None = None, **overrides: Any) -> Settings:
     try:
         return load_settings(config_path=config, overrides={"db_path": db, **overrides})
@@ -117,7 +140,7 @@ def serve(
 
 @app.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
-    help="Run an agent against the proxy: agentvcr run [options] -- python agent.py",
+    options_metavar="[OPTIONS] -- COMMAND...",
 )
 def run(
     ctx: typer.Context,
@@ -132,19 +155,19 @@ def run(
     db: Path | None = DB_OPTION,
     config: Path | None = CONFIG_OPTION,
 ) -> None:
-    """Create a run, point the child process at the proxy, and record what it does.
+    """Run an agent against the proxy and record it: agentvcr run -- python agent.py
 
-    The run id travels in the base URL (``/r/<id>/openai/v1``), so the agent needs no
-    header support and no code change beyond reading ``OPENAI_BASE_URL`` — which both
-    official SDKs already do.
+    The run id travels in the base URL (/r/<id>/openai/v1), so the agent needs no header
+    support and no code change beyond reading OPENAI_BASE_URL — which both official SDKs
+    already do.
 
-    ``--mode replay --run <id>`` replays an existing tape instead: the child is pointed
-    at a fresh *replay* run linked to that tape, so the replay is recorded in its own
-    right and the original recording is never written to.
+    --mode replay --run <id> replays an existing tape instead: the child is pointed at a
+    fresh replay run linked to that tape, so the replay is recorded in its own right and
+    the original recording is never written to.
 
-    ``--mode fork --run <id>`` re-runs a fork made by ``agentvcr fork``. That run
-    already exists — it is where the edits live — so this points the agent at it rather
-    than creating anything.
+    --mode fork --run <id> re-runs a fork made by `agentvcr fork`. That run already
+    exists — it is where the edits live — so this points the agent at it rather than
+    creating anything.
     """
     command = list(ctx.args)
     if not command:
@@ -375,10 +398,10 @@ def remove(
 ) -> None:
     """Delete runs and their steps, tool calls and edits.
 
-    Every step stores the whole conversation up to it (DESIGN.md §8), so a long run is
-    a large run and a tape grows quadratically. This is the way to get that space back
-    short of deleting the database: what it removes it removes for good, and the file
-    is rebuilt afterwards so the disk actually comes free.
+    Every step stores the whole conversation up to it, so a long run is a large run and
+    a tape grows quadratically. This is the way to get that space back short of deleting
+    the database: what it removes it removes for good, and the file is rebuilt
+    afterwards so the disk actually comes free.
     """
     settings = _settings(db, config)
     cutoff = _before_timestamp(before) if before is not None else None
@@ -538,10 +561,9 @@ def fork(
 ) -> None:
     """Branch a recorded run at step N, with an edit, and print how to re-run it.
 
-    The edit is what defines the fork point (DESIGN.md §6). Steps before it replay from
-    the tape for free; from the edit onward the agent makes real calls and reacts to
-    what you changed — which is the question a fork answers: *would it have gone
-    differently?*
+    The edit is what defines the fork point. Steps before it replay from the tape for
+    free; from the edit onward the agent makes real calls and reacts to what you changed
+    — which is the question a fork answers: would it have gone differently?
 
     The fork is created empty. It collects its steps when you re-run the agent against
     it with the command this prints.
@@ -616,11 +638,11 @@ def diff(
 ) -> None:
     """Diff two runs step by step.
 
-    Steps are aligned by fingerprint (DESIGN.md §7), then compared on what the agent actually did:
+    Steps are aligned by fingerprint, then compared on what the agent actually did:
     request messages, response text, tool calls and tool results. Ids, timestamps and
     token counts differ between any two live calls and are not reported.
 
-    Exits 1 when the runs differ, like ``diff(1)`` — so a replay in CI can gate on it.
+    Exits 1 when the runs differ, like diff(1) — so a replay in CI can gate on it.
     """
     settings = _settings(db, config)
     with _store(settings) as store:
@@ -675,9 +697,9 @@ def ui(
 ) -> None:
     """Open the web UI — starting the server first if nothing is serving yet.
 
-    The UI and the proxy are one process on one port, so this is ``serve`` with a
-    browser window: point an agent at the same port while it runs and its calls appear
-    in the run list as they are recorded.
+    The UI and the proxy are one process on one port, so this is `serve` with a browser
+    window: point an agent at the same port while it runs and its calls appear in the
+    run list as they are recorded.
     """
     import webbrowser
 

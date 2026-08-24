@@ -49,8 +49,9 @@ dev = [
 agentvcr = "agentvcr.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/agentvcr/agentvcr"
-Source = "https://github.com/agentvcr/agentvcr"
+Homepage = "https://github.com/Saad7890-web/agentvcr"
+Source = "https://github.com/Saad7890-web/agentvcr"
+Issues = "https://github.com/Saad7890-web/agentvcr/issues"
 
 [tool.hatch.version]
 path = "src/agentvcr/__init__.py"

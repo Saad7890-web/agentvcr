@@ -36,6 +36,38 @@ jobs:
       - run: pip install -e '.[dev]'
       - run: pytest
 
+  # The lower bounds in pyproject are a promise, and `pip install -e .` never tests it:
+  # it resolves to the newest of everything, so a floor that quietly stopped working is
+  # discovered by a user rather than by CI. Two of them had (typer, PLAN.md phase 6).
+  # The numbers are read out of pyproject so there is only ever one copy of them.
+  floors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - name: pin every dependency to the oldest version pyproject allows
+        run: |
+          python - > floors.txt <<'PY'
+          import re
+          from pathlib import Path
+
+          block = re.search(
+              r"\ndependencies = \[(.*?)\n\]", Path("pyproject.toml").read_text(), re.S
+          ).group(1)
+          for raw in re.findall(r'"([^"]+)"', block):
+              spec, _, marker = raw.partition(";")
+              name, bound, low = spec.partition(">=")
+              if bound:
+                  print(f"{name.strip()}=={low.strip()}" + (f" ;{marker}" if marker else ""))
+          PY
+          cat floors.txt
+          pip install -r floors.txt
+      - run: pytest
+
   # The only check that goes through the real CLI, a real socket and a real SDK.
   # It is also the script the launch GIF is recorded from, so it must not rot.
   demo:

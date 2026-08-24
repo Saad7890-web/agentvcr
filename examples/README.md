@@ -10,9 +10,15 @@ pointed at a local `agentvcr serve`.
   gives up because a tool came back empty, one tool result is edited, and the same
   agent books a flight. Record → fork → re-run → diff.
 - [`framework-check/`](framework-check/) — not a demo: the harness that records and
-  replays real LangGraph and OpenAI Agents SDK agents against a scripted upstream that
-  is then killed, to find out where positional replay breaks. It found one place.
+  replays real agents against a scripted upstream that is then killed, to find out where
+  positional replay breaks. It found one place.
 
-Planned (PLAN.md phase 6): `openai-agents-sdk/`, `langgraph/`, `crewai/` — one-line
-`base_url` change each. The first two are already proven to record and replay by
-`framework-check/`; phase 6 is the polish.
+The other three are one agent written three times — one tool, one question, the
+same two steps on the tape — so the diff between them is the framework and nothing else:
+
+- [`langgraph/`](langgraph/) — `create_agent`, and the fan-out caveat.
+- [`openai-agents-sdk/`](openai-agents-sdk/) — and the two SDK defaults to change.
+- [`crewai/`](crewai/) — and the two uploads to turn off.
+
+Each records and replays with the model process dead, verified by `framework-check/`,
+which is also how to run any of them with no API key at all.

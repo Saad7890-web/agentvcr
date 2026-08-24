@@ -53,7 +53,12 @@ runs diverge at step 0 (tool search_flights returned different results)
 | `agent.py` | a ~50-line OpenAI-SDK tool loop; the only agentvcr-shaped line is `base_url` |
 | `fake_upstream.py` | a scripted model that answers according to the tool result it is shown |
 | `demo.py` | drives record → fork → re-run → diff and checks the outcome |
+| `make_gif.py` | renders `demo.py`'s own output into `demo.gif`, the README's hero |
 
 `demo.py` exits non-zero if any of it stops being true, so it doubles as an end-to-end
 test of fork mode against the real CLI and a real HTTP server. `tests/test_fork.py` is
 the fast, in-process version of the same contract.
+
+`demo.gif` is that session as a terminal recording — every line in it is a command
+`demo.py` runs or output it printed. Re-record it by running the demo, updating the
+script in `make_gif.py` to match what it said, and running that (it needs `pillow`).

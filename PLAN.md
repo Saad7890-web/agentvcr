@@ -270,12 +270,37 @@ if Phase 5 slips, the GIF ships from there and the UI lands in v0.2. **Not neede
 
 ## Phase 6 — Polish & launch (week 4–5)
 
-- [ ] `examples/`: OpenAI Agents SDK, LangGraph, CrewAI — each a ≤50-line agent with a
+- [x] `examples/`: OpenAI Agents SDK, LangGraph, CrewAI — each a ≤50-line agent with a
       README showing the one-line `base_url` change (the first two were already proven
-      to record and replay in Phase 3; this is polish, not discovery)
-- [ ] README: hero GIF, quickstart (`uvx agentvcr serve` + three commands), honest
+      to record and replay in Phase 3; this is polish, not discovery).
+      **CrewAI was the one that was not polish**, since nothing had ever pointed it at
+      the proxy — and it records and replays clean on the first try (crewai 1.15.17,
+      2026-08-24: two steps, zero fingerprint drift, zero network calls with the model
+      process dead). What it needed was the same class of thing as the Agents SDK's
+      tracing: **two uploads turned off** (`CREWAI_DISABLE_TELEMETRY` before the import,
+      `Crew(tracing=False)`), neither about replay, both of which would otherwise keep a
+      supposedly offline run talking to the network.
+      **Each example is verified by `framework-check/check.py --agent <path>`** rather
+      than by hand — the harness already records, kills the upstream, replays and
+      compares, so the examples get a no-API-key runner and cannot rot silently. The
+      LangGraph one is written on `langchain.agents.create_agent`, not the prebuilt the
+      Phase 3 probe used, which LangGraph 1.0 deprecated; it replays identically.
+      **CrewAI requires `openai<3` and this repository develops against `openai>=3`.**
+      That is not a conflict to resolve — it is the "a proxy is not a library" claim
+      showing up as a fact, so the crewai README says so where a reader is most likely
+      to be worried about it
+- [x] README: hero GIF, quickstart (`uvx agentvcr serve` + three commands), honest
       limitations section (tool re-execution, concurrency), `.gitignore` note for
-      `.agentvcr/`
+      `.agentvcr/`.
+      **The GIF is rendered from `demo.py`'s own output** (`examples/fork-demo/make_gif.py`,
+      committed beside it) rather than screen-captured: every line in it is a command the
+      demo runs or a line it printed, so it can be re-recorded when the CLI's output
+      changes instead of going quietly stale. A screen recording of the web UI would say
+      more about the product and is the better hero if anyone wants to sit down and make
+      one — this is the version that cannot lie about what the tool prints.
+      **Limitations is its own section, not a caveat inside Replay.** Six of them, each
+      pointing at where it is measured: tools re-execute, fan-out races, two recorded
+      paths and nothing else, quadratic tapes, prompts on disk in the clear, one machine
 - [x] `agentvcr rm <run>…` (with `--before <date>`): nothing in phases 0–5 deletes a
       tape and storage is quadratic in run length (DESIGN.md §8), so a first user who
       records a 200-step run has no way out but `rm -rf .agentvcr/`. The schema already
@@ -285,8 +310,34 @@ if Phase 5 slips, the GIF ships from there and the UI lands in v0.2. **Not neede
       prefix unreplayable, which is a worse outcome than the error. And the delete is
       followed by a `VACUUM` — SQLite keeps freed pages for reuse, so without it the
       200-step run is gone and the file is exactly as large as it was
-- [ ] Package QA: `pip install agentvcr` from TestPyPI on a clean machine; version
-      pinning; `--help` text pass
+- [x] Package QA: `pip install agentvcr` from TestPyPI on a clean machine; version
+      pinning; `--help` text pass. **The TestPyPI upload itself is the one part left** —
+      it needs an account and a token — but everything it would prove has been checked
+      against the built artifacts locally: the wheel *and* the sdist install into a fresh
+      interpreter, carry the prebuilt UI, serve `/ui` and the guarded `/api`, and run
+      `examples/fork-demo/demo.py` end to end. `twine check` passes on both.
+      **The declared typer floor was false**, which is what version pinning turned out to
+      mean here: `>=0.12` cannot build this CLI at all (it annotates options
+      `str | None`), and 0.13 and 0.14 accept `click>=8.0.0` with no ceiling, so pip
+      installs them beside click 8.4 — where `Parameter.make_metavar()` has a required
+      argument — and every `--help` raises. A break with no resolver conflict to warn
+      about it. The floor is `>=0.16`, the first release that works with the click people
+      actually have; 0.15 only works by capping click below 8.2 and dragging it back.
+      **The floors job found that itself, on its first run.** The number it corrected was
+      the one I had just measured by hand — the hand-check installed the wheel with
+      `--no-deps`, which let an old click ride along and made 0.14 look fine. That is the
+      argument for the job: `pip install -e .` resolves to the newest of everything, so
+      the lower bounds are a promise nothing checks until a user checks it for us.
+      **No upper bounds**, deliberately: `<1` on a 0.x dependency would not have caught
+      the one incompatibility this project has actually hit, and it makes agentvcr
+      uninstallable beside anything that upgraded first.
+      The `--help` pass found three real things: `agentvcr run`'s decorator passed a
+      `help=` that *hid its whole docstring*, and rich ate the `[options]` inside it, so
+      the one line it did show was wrong; its usage line never mentioned the `--` the
+      command requires (now `[OPTIONS] -- COMMAND...`); and four commands cited
+      `DESIGN.md §N` at users who do not have that file, since the wheel does not ship
+      it. `--version` now exists next to the `version` command, and a test walks every
+      subcommand's `--help`
 - [ ] Publish to PyPI; tag v0.1.0
 - [ ] Show HN + r/LocalLLaMA posts (lead with the GIF); cross-post examples to the
       frameworks' discussion boards

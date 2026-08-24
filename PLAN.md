@@ -270,9 +270,25 @@ if Phase 5 slips, the GIF ships from there and the UI lands in v0.2. **Not neede
 
 ## Phase 6 — Polish & launch (week 4–5)
 
-- [ ] `examples/`: OpenAI Agents SDK, LangGraph, CrewAI — each a ≤50-line agent with a
+- [x] `examples/`: OpenAI Agents SDK, LangGraph, CrewAI — each a ≤50-line agent with a
       README showing the one-line `base_url` change (the first two were already proven
-      to record and replay in Phase 3; this is polish, not discovery)
+      to record and replay in Phase 3; this is polish, not discovery).
+      **CrewAI was the one that was not polish**, since nothing had ever pointed it at
+      the proxy — and it records and replays clean on the first try (crewai 1.15.17,
+      2026-08-24: two steps, zero fingerprint drift, zero network calls with the model
+      process dead). What it needed was the same class of thing as the Agents SDK's
+      tracing: **two uploads turned off** (`CREWAI_DISABLE_TELEMETRY` before the import,
+      `Crew(tracing=False)`), neither about replay, both of which would otherwise keep a
+      supposedly offline run talking to the network.
+      **Each example is verified by `framework-check/check.py --agent <path>`** rather
+      than by hand — the harness already records, kills the upstream, replays and
+      compares, so the examples get a no-API-key runner and cannot rot silently. The
+      LangGraph one is written on `langchain.agents.create_agent`, not the prebuilt the
+      Phase 3 probe used, which LangGraph 1.0 deprecated; it replays identically.
+      **CrewAI requires `openai<3` and this repository develops against `openai>=3`.**
+      That is not a conflict to resolve — it is the "a proxy is not a library" claim
+      showing up as a fact, so the crewai README says so where a reader is most likely
+      to be worried about it
 - [ ] README: hero GIF, quickstart (`uvx agentvcr serve` + three commands), honest
       limitations section (tool re-execution, concurrency), `.gitignore` note for
       `.agentvcr/`

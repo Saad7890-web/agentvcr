@@ -64,14 +64,17 @@ from a single green result.
 
 ## Why these files are not `examples/`
 
-They are instruments, not demos. `examples/` gets the polished ≤50-line agents in
-Phase 6; these exist to answer a question, and they stay so the answer can be
-re-checked when a framework releases a new major version.
+They are instruments, not demos. The polished agents live in
+[`../langgraph/`](../langgraph/), [`../openai-agents-sdk/`](../openai-agents-sdk/) and
+[`../crewai/`](../crewai/); these exist to answer a question, and they stay so the
+answer can be re-checked when a framework releases a new major version. `check.py`
+takes `--agent <path>`, so it doubles as the no-API-key way to run any of them.
 
 `langgraph_agent.py` uses `langgraph.prebuilt.create_react_agent`, which LangGraph 1.0
 deprecated in favor of `langchain.agents.create_agent` — the replacement lives in the
 `langchain` package, which this check deliberately does not install. The deprecation
-warning in the output is expected.
+warning in the output is expected. The `langgraph/` example uses the replacement, and
+records and replays identically through it.
 
 The run each probe records is named after its agent file, so `agentvcr runs` in the
 scratch database says which framework produced which tape.

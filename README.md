@@ -27,9 +27,12 @@ both the OpenAI and Anthropic wire formats: the proxy forwards calls to any comp
 upstream, streaming included, writes every step to a local SQLite tape, reconstructs the
 tool timeline from those steps alone, replays the tape offline for free without ever
 contacting an upstream, branches a run at any step with an edited response, tool result
-or prompt, and serves all of it from a local web UI at `/ui`. Left before v0.1.0:
-examples for the popular frameworks, and packaging QA — see
-[`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the architecture.
+or prompt, and serves all of it from a local web UI at `/ui`. There are runnable
+examples for [LangGraph](examples/langgraph/), the
+[OpenAI Agents SDK](examples/openai-agents-sdk/) and [CrewAI](examples/crewai/), each
+verified by recording it, killing the model, and replaying. Left before v0.1.0:
+packaging QA — see [`PLAN.md`](PLAN.md), and [`DESIGN.md`](DESIGN.md) for the
+architecture.
 
 ## Quickstart
 

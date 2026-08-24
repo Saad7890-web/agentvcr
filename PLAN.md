@@ -316,12 +316,18 @@ if Phase 5 slips, the GIF ships from there and the UI lands in v0.2. **Not neede
       against the built artifacts locally: the wheel *and* the sdist install into a fresh
       interpreter, carry the prebuilt UI, serve `/ui` and the guarded `/api`, and run
       `examples/fork-demo/demo.py` end to end. `twine check` passes on both.
-      **Two of the declared floors were false**, which is what version pinning turned out
-      to mean here: `typer>=0.12` cannot build this CLI at all (it annotates options
-      `str | None`) and `typer>=0.13` cannot render a single `--help` against click 8.4.
-      The floor is `>=0.14`, and there is now a CI `floors` job that installs the oldest
-      version each bound allows and runs the suite, because `pip install -e .` resolves
-      to the newest of everything and would never have caught it.
+      **The declared typer floor was false**, which is what version pinning turned out to
+      mean here: `>=0.12` cannot build this CLI at all (it annotates options
+      `str | None`), and 0.13 and 0.14 accept `click>=8.0.0` with no ceiling, so pip
+      installs them beside click 8.4 — where `Parameter.make_metavar()` has a required
+      argument — and every `--help` raises. A break with no resolver conflict to warn
+      about it. The floor is `>=0.16`, the first release that works with the click people
+      actually have; 0.15 only works by capping click below 8.2 and dragging it back.
+      **The floors job found that itself, on its first run.** The number it corrected was
+      the one I had just measured by hand — the hand-check installed the wheel with
+      `--no-deps`, which let an old click ride along and made 0.14 look fine. That is the
+      argument for the job: `pip install -e .` resolves to the newest of everything, so
+      the lower bounds are a promise nothing checks until a user checks it for us.
       **No upper bounds**, deliberately: `<1` on a 0.x dependency would not have caught
       the one incompatibility this project has actually hit, and it makes agentvcr
       uninstallable beside anything that upgraded first.
